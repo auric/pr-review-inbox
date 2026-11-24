@@ -1,6 +1,6 @@
 # Stacked pull requests
 
-Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is built (2026-11-24, 3f152e5). Branch reads stay off (STACK_READS=false) until the user runs Gates G9, G12, and G20. Gate SK-P is running. Open: Gate SK-B and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
+Status: Designed 2026-11-20. WP-SK0 to WP-SK2 are built (2026-11-23). WP-SK3 is built (2026-11-24, 3f152e5). Branch reads stay off (STACK_READS=false) until the user runs Gates G9, G12, and G20. Gate SK-P passed (2026-11-24 rerun, docs/eval/results.md). Open: Gate SK-B and WP-SK4. Builds in wave RP with submodule-prs.md (user decision of 2026-11-23, section 14). The user accepted the section 12 defaults on 2026-11-23. Joint Gate A ran on 2026-11-20, and prompt 2.9 ships "preexisting". The held "callers" run does not block this wave, because without "stack" K3 keeps all eval inputs the same. Work: packages WP-SK0 to WP-SK4, gates G20, SK-P, and SK-B. REVIEW_PROMPT_VERSION does not change until WP-SK4.
 
 ## 1. Request
 
@@ -279,8 +279,10 @@ SK-P rerun fixes (2026-11-24), after the first SK-P did not discriminate:
 
 ### Gate SK-P (probe, user runs)
 
+Status: passed on 2026-11-24 (rerun at f7d354c). Stack: 0 trap hits over 12 runs; the control hit the child-fills trap in 2 of 3 runs. Must-finds 100% in both arms, 0 failed runs, total cost -6.5%.
+
 - `bun run eval -- --real --set probe --cases probe-stack-relies,probe-stack-unreached,probe-stack-child-fills,probe-stack-meaning --repeat 3`, once with `--variants stack` and once without. docs/eval/local.md has the full commands. Both sides run fresh, so the version of a stored baseline does not matter.
-- Pass: with "stack", 0 trap hits over the 12 runs. The must-finds of probe-stack-relies and probe-stack-meaning are found at least as often as in the control. Failed runs do not rise. Cost per case rises by at most 25%.
+- Pass: with "stack", 0 trap hits over the 12 runs. The must-finds of probe-stack-relies and probe-stack-meaning are found at least as often as in the control. Failed runs do not rise. The total cost of the 12 runs rises by at most 25%. The user set this reading on 2026-11-24: one run that costs double can move one case past 25%.
 - The gate checks behavior, not recall. 3 cases cannot show a recall gain.
 
 ### Gate SK-B (manual, user)

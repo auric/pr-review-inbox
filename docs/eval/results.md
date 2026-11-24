@@ -157,7 +157,7 @@ Stale gold from carry:
 Probe gates SK-P and SM-P (synthetic cases, commit e4c2764, about $6 in total):
 
 - SK-P (variant "stack") passes on traps (0 over 9 runs), the "relies" must-find (3 of 3 in both arms), and failed runs (0).
-- SK-P cost per case: +1.6% over all cases. On the "relies" case alone it is +27%, because one run cost double. The cost clause of the rule needs the user's reading.
+- SK-P cost per case: +1.6% over all cases. On the "relies" case alone it is +27%, because one run cost double. Settled: on 2026-11-24 the user set the 25% cap on the total of the runs, so this run also passes.
 - SK-P does not discriminate: the control already passes. The case title leaks the child PR into the task summary of the control (scripts/eval/run.ts, about line 837).
 - With the variant, 2 of 3 runs raised an open risk that names the child PR.
 - SM-P (variant "submodules") fails on probe-sub-caller: 0 of 3 in both arms. An app bug causes this, not the model.
@@ -165,3 +165,15 @@ Probe gates SK-P and SM-P (synthetic cases, commit e4c2764, about $6 in total):
 - A fix is built: the judge fills the gitlink quote with "Subproject commit <hash>". A rerun of that case follows after the push.
 - probe-sub-signature: control 2 of 3, variant 3 of 3. Without the variant, runs asked 14 questions over 9 runs and cost twice as much.
 - Rerun after 2232671: probe-sub-caller with the variant found the must-find in 3 of 3 runs, 0 trap hits. SM-P passes.
+
+### 2026-11-24: Gate SK-P rerun with the sharper probe
+
+Code f7d354c, cases probe-stack-relies, -unreached, -child-fills, and -meaning, repeat 3, control and variant "stack", 24 runs, about $6.50 in total.
+
+- Traps: control 26.7% per trap, all on probe-stack-child-fills (2 of 3 runs flagged the partial line). Stack: 0 over 12 runs.
+- Must-finds of probe-stack-relies and probe-stack-meaning: 100% in both arms. probe-stack-meaning does not discriminate: the control found the flip without the parent diff.
+- Failed runs: 0 in both arms. One stack run of probe-stack-unreached had a coverage gap (incomplete).
+- Cost per case: control $0.281, stack $0.262 (-6.5% total). Per case: relies +8%, unreached +23%, child-fills -19%, meaning -22%. Minutes per case: 1.0 and 0.9.
+- Precision: 43.3% and 55.6% (+12.2 points). Noise: 0.33 and 0.42 per case. False positives: 0.67 and 0.42 per case.
+- expectMention on probe-stack-child-fills: the control names the child PR in 0 of 3 runs, the stack arm in 2 of 3.
+- Verdict: SK-P passes on all clauses. The trap clause now discriminates, because `taskSummary` keeps the child PR out of the control's task summary.
