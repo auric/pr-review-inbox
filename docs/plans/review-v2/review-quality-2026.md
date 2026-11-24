@@ -307,7 +307,7 @@ Report other problems too.
 
 ### 11. Caller check and pre-existing problems (variants "callers" and "preexisting")
 
-- Status: built 2026-11-19 as opt-in variants for the eval against the Gate A baseline (prompt 2.8, PROFILES_VERSION 9). On 2026-11-21, "preexisting" passed the Gate A full run under the noise rule of section 2: noise +0.10 against the limit 0.127, judge fp -0.04, recall 17.5 to 18.5, and cost -2%. Prompt 2.9 ships it as the default. "callers" stays opt-in. docs/plans/review-v3.md WP-V6 and WP-V5 hold the rules, the commands, and the ship rule draft.
+- Status: built 2026-11-19 as opt-in variants for the eval against the Gate A baseline (prompt 2.8, PROFILES_VERSION 9). On 2026-11-21, "preexisting" passed the Gate A full run under the noise rule of section 2: noise +0.10 against the limit 0.127, judge fp -0.04, recall 17.5 to 18.5, and cost -2%. Prompt 2.9 ships it as the default. "callers" stays opt-in. docs/plans/review-v3.md WP-V6 and WP-V5 hold the rules, the commands, and the ship rule draft. CodeGraph (WP-V5) stays opt-in and never ships as a default (user, 2026-11-24).
 - "callers": the finder checks the callers and consumers of each changed symbol outside the diff (research T6). Ship rule: "better" of section 2.
 - "preexisting": blocker and major problems in unchanged code go to their own fold, never to a post. The eval counts them apart (metric `preexisting`, row "Pre-existing findings"), so they are neither noise nor recall.
 

@@ -100,6 +100,7 @@ Aggregate numbers only. The local set holds company code, so no case names, path
 - Ceiling: the mean recall of 90.9% leaves at most 3 seeds of gain. That is less than S_R, so no recall raiser can pass the "better" rule on this set. The set is a noise and regression guard only.
 - Why the seeds are easy (free checks): line match and the matcher agree on 90 of 99 seed results, and the matcher was right on all 9 disagreements. About 8 of 33 seeds fail a test that the PR itself adds or changes. 3 seeds sit in test code. The natural known issues on the same cases (25 extras) were found in 11 of 75 runs by the matcher (14.7%, 25 issues x 3 runs), against 91% for seeds. The earlier figure of 8 of 75 was a line match with one false hit.
 - Decision: pending with the user (2026-11-23). The proposal: stop seeding for recall, and keep the seeded set as a guard for noise, regressions, and verify-only candidates such as obligations. Measure the recall raisers (lenses3, callers, codegraph) on the natural local set against a new prompt 2.9 baseline. The seeded runs of callers+codegraph and lenses3 are held.
+- Superseded on 2026-11-24 for codegraph: CodeGraph stays opt-in, and no full run of it is planned. See the 2026-11-24 pilot subsection.
 
 ### SG-A natural-issue analysis (2026-11-23, free, from stored records)
 
@@ -126,6 +127,7 @@ Aggregate numbers only. The local set holds company code, so no case names, path
 - Position: never-found issues sit later in the diff (median 0.85 of files) than found seeds (0.63). The permutation p is about 0.045, but the items are not independent, so the evidence is weak.
 - Decision (2026-11-23): option 2 stands. The seeded set is a guard. No paid recall gate runs now.
 - Open ideas, not approved: (a) eval fidelity: carry the PR note into the local set, so the eval matches the app. (b) An "oracle look" script (about $3 to $7) gives a fresh run only the file and hunk of each issue. It tests whether focused attention finds them. (c) Fix the codegraph tool-name problem before any codegraph measurement.
+- Superseded on 2026-11-24: the tool-name fix landed on 2026-11-23 (review-ledger.md). CodeGraph stays opt-in, and no full run of it is planned.
 
 ### 2026-11-24: oracle look, stale gold from carry, and probe gates SK-P and SM-P
 
@@ -177,3 +179,13 @@ Code f7d354c, cases probe-stack-relies, -unreached, -child-fills, and -meaning, 
 - Precision: 43.3% and 55.6% (+12.2 points). Noise: 0.33 and 0.42 per case. False positives: 0.67 and 0.42 per case.
 - expectMention on probe-stack-child-fills: the control names the child PR in 0 of 3 runs, the stack arm in 2 of 3.
 - Verdict: SK-P passes on all clauses. The trap clause now discriminates, because `taskSummary` keeps the child PR out of the control's task summary.
+
+### 2026-11-24: pilot of callers, codegraph, and lenses3 on the natural set
+
+Code a84610d, 2 natural cases, repeat 1, three arms. Total cost $16.12.
+
+- codegraph: 2 of 2 runs complete. The MCP server started in both runs. 4 of 9 must-finds shown. Cost against the callers arm: +11% and +42% on the two cases. These are single runs, not a reliable cost estimate.
+- lenses3: 3 passes ran. Cost about 7x a baseline run on the same case ($5.13 against $0.74). 3 of 9 must-finds shown.
+- callers: cost about the same as a baseline run. 2 of 9 must-finds shown. The callers arm uses a prompt near the baseline.
+- Two cases cannot show a quality difference.
+- Decision (user, 2026-11-24): CodeGraph stays opt-in and does not become a default, because some users do not need it. No full eval run of "codegraph" is planned. The full runs of callers and lenses3 are open with the user.

@@ -1,6 +1,6 @@
 # Review v3 plan
 
-Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. On 2026-11-19, WP-V6 (pre-existing group) and the caller rule of D2 were built as opt-in variants. Their names are "preexisting" and "callers". On 2026-11-21, prompt 2.9 shipped "preexisting" as the default after Gate A, and "callers" stays opt-in. On 2026-11-22, WP-V5 was built as the opt-in variant "codegraph", so the seeded set can measure it against SG-A. It is not on by default, because the BRIEF 3.5 text of section 6 has no approval yet. WP-V8 is not built. WP-V7 is superseded by obligations (review-v2/obligations.md, kind "criterion"), decided by the user on 2026-11-21. WP-V9 and WP-V10 are blocked, and WP-V12 is superseded by the obligation check. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
+Status: planned, 2026-10-28. WP-V1, WP-V2, WP-V3, and WP-V4 are code complete. Gate U-V1 ran on 2026-10-31 with no winner (docs/eval/results.md), so WP-V4 only removed the lost variants. Wave 5 (section 10, recall on large PRs) stopped on 2026-11-01 after its first gate. Later review work goes on in review-v2/review-quality-2026.md. On 2026-11-19, WP-V6 (pre-existing group) and the caller rule of D2 were built as opt-in variants. Their names are "preexisting" and "callers". On 2026-11-21, prompt 2.9 shipped "preexisting" as the default after Gate A, and "callers" stays opt-in. On 2026-11-22, WP-V5 was built as the opt-in variant "codegraph", so the seeded set can measure it against SG-A. On 2026-11-24, the user decided that CodeGraph stays opt-in and never becomes a default, because some users do not need it. This replaces the default of D2, WP-V5, Gate U-V3, and section 6. No full eval run of "codegraph" is planned. WP-V8 is not built. WP-V7 is superseded by obligations (review-v2/obligations.md, kind "criterion"), decided by the user on 2026-11-21. WP-V9 and WP-V10 are blocked, and WP-V12 is superseded by the obligation check. The user decided D1 to D3 (section 1) and the open questions Q1 to Q9 and Q11 to Q13 (section 9) on 2026-10-28. Q10 stays open.
 
 Sources: a comparison of our review pipeline with a similar app (2026-10-28, not in the repository), BRIEF.md sections 3.5 and 3.6, docs/plans/review-v2/design.md (R1 to R17, M1 to M4), docs/plans/review-v2/tasks.md (package format), scripts/eval/, and src/server/review/{catalog.ts, prompt.ts, validate.ts, codegraph.ts, jobs.ts}. Never name the other app, its author, or any company, host, or project in this repository.
 
@@ -18,7 +18,7 @@ Sources: a comparison of our review pipeline with a similar app (2026-10-28, not
 | ID | Decision | Replaces | Why |
 |---|---|---|---|
 | D1 | A serious problem in unchanged code stays as a folded "Pre-existing" group. The app never posts it by default. | design.md R6 for this case. A finding with a changed anchor or a changed cause keeps R6. | The drop loses real signal. A fold keeps the main list short. |
-| D2 | CodeGraph indexes the sanitized snapshot by default for every review when the `codegraph` CLI is installed. A profile can turn it off. | The opt-in user MCP pick as the only path (jobs.ts profileServers). | Callers outside the diff need an index. Grep alone misses them. |
+| D2 | CodeGraph indexes the sanitized snapshot by default for every review when the `codegraph` CLI is installed. A profile can turn it off. | The opt-in user MCP pick as the only path (jobs.ts profileServers). | Callers outside the diff need an index. Grep alone misses them. Superseded on 2026-11-24 for the default: CodeGraph stays opt-in (user decision). The caller rule stays. |
 | D3 | CI build log investigation comes in a later wave. It needs a BRIEF 3.6 change (a new outbound origin) and the user's CI facts first. | None. | A new origin is a hard-rule change. Section 9 lists the facts. |
 
 Plan decisions that follow from D1 to D3 and the comparison:
@@ -49,7 +49,7 @@ Plan decisions that follow from D1 to D3 and the comparison:
 | U-V1 | User gate: `bun run eval:ab`, the shipped profile against the candidate (section 5) | WP-V1, WP-V2, WP-V3 |
 | W2b | WP-V4 | U-V1 |
 | W3 | WP-V5, then WP-V6, then WP-V7 (superseded by obligations, 2026-11-21), then WP-V8 (shared files, merge order); WP-V9 after each server part merges | WP-V4; WP-V5 also needs the BRIEF 3.5 approval (section 6) |
-| U-V3 | User gate: CodeGraph on against off, and the pre-existing count; smoke docs/smoke-review-v3.md | W3 |
+| U-V3 | User gate: CodeGraph on against off, and the pre-existing count; smoke docs/smoke-review-v3.md. The CodeGraph part does not run: CodeGraph stays opt-in (user, 2026-11-24). | W3 |
 | W4 | WP-V10a, then WP-V10b; WP-VCI0 (gate, read only) | U-V3 (V10); D3 facts and the BRIEF 3.6 approval (VCI) |
 | W4b | WP-VCI1, then WP-VCI2; WP-V12 only when U-V3 leaves a gap | WP-VCI0 passed; the gap rule of WP-V12 |
 
@@ -174,7 +174,9 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 - Control mutation: upgrade an edited profile. The edited-profile test must fail.
 - Depends: U-V1. When no variant wins, this package only removes the variant code.
 
-### WP-V5. CodeGraph by default (implementer-xhigh, W3; idea 2, D2)
+### WP-V5. CodeGraph, opt-in (implementer-xhigh, W3; idea 2, D2)
+
+- Decision (user, 2026-11-24): CodeGraph stays the opt-in variant "codegraph". It never becomes a default, because some users do not need it. The profile switch, its default fill, the BRIEF 3.5 bullet of section 6, and the full U-V3 measurement do not come. The planned files and behavior below record the old default plan.
 
 - Files: src/server/review/codegraph.ts (an app entry for an installed `codegraph` executable, found with Bun.which; no npx); src/server/review/jobs.ts (profileServers: the default server when the profile switch is on and no user codegraph server is picked; one index per run as today); src/server/review/catalog.ts (one context line: use CodeGraph for callers and dependents of changed symbols; the tool allowlist); src/shared/dto.ts (Profile `codegraph: boolean`, default true for shipped profiles); src/server/config.ts and settings.ts (default fill); scripts/eval/run.ts (`--codegraph on|off`); integration-check.md (row: codegraph network use with DO_NOT_TRACK and CODEGRAPH_NO_UPDATE_CHECK, from the package source); BRIEF.md 3.5 (the approved text of section 6); tests/review/codegraph.test.ts, tests/review/jobs.test.ts.
 - Behavior: the run indexes repo/ of the snapshot with the existing indexCodegraph (120 s cap, cache in the data folder). The run allows only tools with readOnlyHint, as the user MCP safety rule does. A failed or slow index leaves the server out, and the run log and the Brief gaps say so. A missing executable gives one gap line, and the run goes on. A user-picked codegraph server wins over the default, so one index serves the run.
@@ -192,7 +194,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
   - Network: the run entry and the index set `DO_NOT_TRACK`, `CODEGRAPH_NO_UPDATE_CHECK`, `CODEGRAPH_NO_DOWNLOAD`, and `CODEGRAPH_NO_DAEMON` (serve only). The index runs the command of the server that the user picked, which can be an npx spec. The app adds no command of its own today.
   - What WP-V5 adds: a default entry for an installed `codegraph` (Bun.which), the profile switch, and the eval flag `--codegraph`. The index, the cache, and the cleanup above already exist.
 - Implementation notes (2026-11-22, built as the opt-in variant "codegraph"; the user decided on 2026-11-22 to measure it first):
-  - Switch: the variant "codegraph" (dto.ts VARIANTS), not the profile field `codegraph` and not the eval flag `--codegraph on|off`. The eval selects it with `--variants codegraph` or `eval:ab --candidate-variants codegraph`, and prompt_version gets "+codegraph". The profile field, its default fill, and PROFILES_VERSION come with a ship as a default, after U-V3 and the BRIEF 3.5 approval.
+  - Switch: the variant "codegraph" (dto.ts VARIANTS), not the profile field `codegraph` and not the eval flag `--codegraph on|off`. The eval selects it with `--variants codegraph` or `eval:ab --candidate-variants codegraph`, and prompt_version gets "+codegraph". The profile field, its default fill, and PROFILES_VERSION came only with a ship as a default. That ship does not come (user, 2026-11-24).
   - Scope: review and re-review runs only, and not with an Explain profile. Task, implement, and own-review runs keep the user pick path only.
   - Executable: jobs.ts finds `codegraph` with Bun.which. The command is the bare name `codegraph`, as in a user config that the CLI starts. jobs.ts `codegraphCommand` replaces it in tests. The app never runs npx for it. A missing executable gives the gap line "CodeGraph: the codegraph executable is not installed".
   - Index: the same indexCodegraph as a user pick (120 s cap, the cache per repository, the indexing phase, Cancel). A failed index gives "CodeGraph: no index (<reason>)". A gap line makes the run incomplete, as every app gap does.
@@ -260,6 +262,7 @@ Ports: E2E_JIRA_PORT / E2E_FAKE_PORT / E2E_APP_PORT.
 
 - `bun run eval:ab -- --candidate-variants codegraph --candidate-repeat 2`, and the same on set hard.
 - Keep CodeGraph on by default only when recall rises and minutes stay within section 0. Else the shipped profile turns it off, and the switch stays.
+- Superseded on 2026-11-24: CodeGraph stays opt-in (user decision), so the CodeGraph part of U-V3 does not run.
 - The user runs docs/smoke-review-v3.md on a real PR.
 
 ### WP-V10a. CodeGraph impact: server (implementer, W4; idea 11)
@@ -313,6 +316,8 @@ The `rules2` variant holds five ideas. `bun run eval:ab -- --candidate-effort <l
 5. Verify examples: the verify phase gets four generic false positives to refute.
 
 ## 6. BRIEF 3.5 wording draft (needs approval at merge)
+
+Not applied: CodeGraph stays opt-in (user, 2026-11-24). BRIEF 3.5 keeps its user-pick text.
 
 WP-V5 adds this bullet after the user MCP bullet of BRIEF 3.5. It changes no hard rule: the server is app-run, local, read only, and indexes only the snapshot.
 

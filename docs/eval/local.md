@@ -279,7 +279,7 @@ bun run eval:compare -- <runs3 candidate result.json> <lenses3 candidate result.
 
 ## CodeGraph
 
-The variant `codegraph` (docs/plans/review-v3.md WP-V5) is opt-in. Its candidate runs against SG-A, the seeded baseline of prompt 2.9. Install `codegraph` first, so that `codegraph --version` works in the same shell. The app never runs npx for it.
+The variant `codegraph` (docs/plans/review-v3.md WP-V5) is opt-in. It stays opt-in and never becomes a default (user, 2026-11-24). No full eval run of it is planned. The commands below stay for a manual check. Its candidate runs against SG-A, the seeded baseline of prompt 2.9. Install `codegraph` first, so that `codegraph --version` works in the same shell. The app never runs npx for it.
 
 Pilot on two seeded hosts first. Check that each run has no `CodeGraph:` line and that the index time in the app log stays well under 120 s:
 

@@ -576,7 +576,7 @@ SG-A result (2026-11-23, prompt 2.9, default profile, 16 cases, 33 seeds, repeat
 - G-L0 fails: Δu is 3 seeds (9.1 points), not more than S_R (focused-passes.md section 5.3).
 - U4 answer, why the seeds are easy (free checks): line match and the matcher agree on 90 of 99 seed results, and the matcher was right on all 9 disagreements. About 8 of 33 seeds fail a test that the PR itself adds or changes. 3 seeds sit in test code. The natural known issues on the same cases (25 extras) were found 8 of 75 times (about 11%), against 91% for seeds.
 - Role now: the seeded set is a guard for noise, regressions, and verify-only candidates, such as an obligations replay of SG-A (section 6.4). It does not gate recall raisers.
-- Pending with the user (2026-11-23), not decided: stop seeding for recall. Measure the recall raisers (lenses3, callers, codegraph) on the natural local set against a new prompt 2.9 baseline. The seeded runs of callers+codegraph and lenses3 are held until the user decides.
+- Pending with the user (2026-11-23), not decided: stop seeding for recall. Measure the recall raisers (lenses3, callers, codegraph) on the natural local set against a new prompt 2.9 baseline. The seeded runs of callers+codegraph and lenses3 are held until the user decides. Update on 2026-11-24: CodeGraph stays opt-in (user decision). No natural-set run is planned for codegraph.
 
 ### SG-P. Pilot (paid, about $3-8)
 

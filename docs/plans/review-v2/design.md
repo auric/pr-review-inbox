@@ -509,7 +509,7 @@ Cost: one autopilot run per burst of comments, about one reply-run cost. A guard
 | Time and cost per run and phase in the run line | Now | usage_json exists. Users need it to trust the verify phase. |
 | Summary ledger in plain words ("2 must fix, 3 worth fixing, 4 more") | Now | Part of WP-R4. |
 | Two passes, cheap then deep (a fast triage marks risky files, a deep pass reads them) | Later | The verify phase comes first. The eval shows if recall needs it. |
-| CodeGraph for the finder by default when the user has it | Later | Index time up to 120 s per run. Measure with an eval case that has a caller bug first. |
+| CodeGraph for the finder by default when the user has it | Later | Index time up to 120 s per run. Measure with an eval case that has a caller bug first. Superseded on 2026-11-24: CodeGraph stays opt-in (user decision). No natural-set run is planned for codegraph. |
 | Re-anchor dropped findings (post as a general comment) | Later | BRIEF: invalid references become coverage problems. Needs a user decision. |
 | Per-repo learned rules ("Learn from discards") | Later | Needs the discard reasons of part 4 first (M4). |
 | Topic specialist agents for "Show everything" | Later | S13. The eval can show a gain. |
