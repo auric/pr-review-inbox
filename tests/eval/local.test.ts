@@ -392,7 +392,7 @@ describe("eval:local selection", () => {
     expect(built.stderr).toBe("");
     expect(built.code).toBe(0);
     expect(built.stdout).toContain("Local eval set: 2 cases from 3 review runs in 1 repositories.");
-    expect(built.stdout).toContain("Must find: 14 findings and 1 of your own comments. Must not raise: 6. Neutral: 3.");
+    expect(built.stdout).toContain("Must find: 10 findings and 1 of your own comments. Must not raise: 6. Neutral: 7.");
     expect(built.stdout).toContain(
       "Sources before carry: 9 posted, 1 covered by a fix commit, 1 accepted by your session, 1 posted and then withdrawn in the thread (must not raise), 2 line comments of other reviewers that are resolved or on a changed line.",
     );
@@ -408,7 +408,7 @@ describe("eval:local selection", () => {
     expect(built.stdout).toContain("below the recommended minimum");
     for (const name of [TMP, OUT, "PROJ", "Add the calc helpers", "EVAL-9"]) expect(built.stdout).not.toContain(name);
     const m = JSON.parse(readFileSync(join(OUT, "MANIFEST.json"), "utf8")) as Manifest;
-    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 14, traps: 6, extras: 3, human: 1 });
+    expect(m.counts).toEqual({ cases: 2, runs: 3, repositories: 1, bugs: 10, traps: 6, extras: 7, human: 1 });
     expect(m.sources).toEqual({ posted: 9, fixed: 1, session: 1, withdrawn: 1, other: 2 });
     expect(m.carried).toEqual({ carried: 7, changed: 3, gone: 0, overlap: 1 });
     expect(readdirSync(join(OUT, "bundles"))).toHaveLength(1);
@@ -447,17 +447,18 @@ describe("eval:local selection", () => {
     expect(a.bugs.every((b) => b.path === PATH && b.side === "new" && b.carriedFrom === undefined)).toBe(true);
   });
 
-  test("a later head of the PR gets the bugs and traps whose lines still hold, and never the other way", () => {
+  test("a later head of the PR gets the bugs as extras and the traps whose lines still hold, and never the other way", () => {
     const b = caseOf(heads.b);
     expect(b.bugs.map((x) => [x.id, x.lines, x.carriedFrom ?? null])).toEqual([
       [ofItem(ids.copy), [35, 35], null],
       [ofItem(ids.onlyB), [3, 3], null],
-      [ofItem(ids.posted), [10, 11], heads.a],
-      [ofItem(ids.restored), [2, 2], heads.a],
-      // ids.carried overlaps its own copy at head B: one item. ids.changed: head B changes line 37.
-      // ids.session: head B changes line 20.
-      [ofItem(ids.fixed), [38, 38], heads.a],
-      [ofItem(ids.second), [12, 12], heads.a],
+    ]);
+    // ids.carried overlaps its own copy at head B: one item. ids.changed: head B changes line 37. ids.session: head B changes line 20.
+    expect(b.extras.map((x) => [x.lines, x.carriedFrom ?? null])).toEqual([
+      [[10, 11], heads.a],
+      [[2, 2], heads.a],
+      [[38, 38], heads.a],
+      [[12, 12], heads.a],
     ]);
     expect(b.traps.map((x) => [x.id, x.lines, x.carriedFrom ?? null])).toEqual([
       [ofItem(ids.notBug), [30, 30], heads.a],
@@ -465,7 +466,7 @@ describe("eval:local selection", () => {
       [ofItem(ids.withdrawn), [6, 6], heads.a],
     ]);
     // Neither extras nor your comments move.
-    expect(b.extras).toEqual([]);
+    expect(b.extras.filter((x) => !x.carriedFrom)).toEqual([]);
     expect(b.human).toEqual([]);
     expect(caseOf(heads.a).bugs.map((x) => x.id)).not.toContain(ofItem(ids.onlyB));
   });
@@ -532,7 +533,7 @@ describe("eval:local selection", () => {
   });
 
   test("each plain case states the must-find rules, so a new rule gives a new set fingerprint", () => {
-    expect([caseOf(heads.a).rules, caseOf(heads.b).rules]).toEqual([5, 5]);
+    expect([caseOf(heads.a).rules, caseOf(heads.b).rules]).toEqual([6, 6]);
   });
 
   test("a case holds the threads of other people when its run started, with placeholders for the names of the database's people", () => {
@@ -746,7 +747,7 @@ describe("eval:local selection", () => {
       ["Title 40\n\nTrigger 40\n\nBody 40", "logic"],
     ]);
     // Carried items keep their text and source.
-    expect(b.bugs.find((x) => x.id === ofItem(ids.posted))).toMatchObject({
+    expect(b.extras.find((x) => x.lines[0] === 10 && x.carriedFrom === heads.a)).toMatchObject({
       text: `Title 10\n\nTrigger 10\n\n${EDITED_CLEAN}`,
       source: "posted",
     });
@@ -937,7 +938,8 @@ function makeCleanDb(dir: string, h: Heads) {
   pr(3, "MERGED", h.a);
   run(3, h.a);
   comment(300, 3, "other", h.a);
-  // 4: a posted finding at head A carries to head B. Both are plain cases.
+  // 4: a posted finding at head A carries to head B as an extra. Head A is a plain case. Head B holds a known issue, so it is no clean
+  // case, and the build leaves it out.
   pr(4, "MERGED", h.b);
   item(run(4, h.a), "posted", 2);
   run(4, h.b);
@@ -982,20 +984,19 @@ describe("eval:local clean cases", () => {
     );
     const m = JSON.parse(readFileSync(join(out, "MANIFEST.json"), "utf8")) as Manifest;
     expect(m.clean).toEqual({ asked: 2, candidates: 3, cases: 2 });
-    expect(m.counts.cases).toBe(4);
-    // Heads with nothing to find that the build leaves out: 1 A, 2, 3, 5, 6 A and B, both merge bases of 8, and 9.
-    expect(m.skipped.emptyCases).toBe(9);
+    expect(m.counts.cases).toBe(3);
+    // Heads with nothing to find that the build leaves out: 1 A, 2, 3, 4 B (only a carried extra), 5, 6 A and B, both merge bases of 8, and 9.
+    expect(m.skipped.emptyCases).toBe(10);
     const cases = loadCases("all", join(out, "cases"));
     expect(cases.map((c) => [c.id, c.clean ?? false]).sort()).toEqual(
       [
         [at(1, heads.b, heads.base), true],
         [at(4, heads.a, heads.base), false],
-        [at(4, heads.b, heads.base), false],
         [at(7, heads.c, heads.base), true],
       ].sort(),
     );
     const one = cases.find((c) => c.id === at(1, heads.b, heads.base));
-    expect(one).toMatchObject({ bugs: [], traps: [], human: [], group: "pr1", hasTask: false, large: false, rules: 5 });
+    expect(one).toMatchObject({ bugs: [], traps: [], human: [], group: "pr1", hasTask: false, large: false, rules: 6 });
     expect(one?.extras?.map((x) => [x.lines, x.source])).toEqual([[[15, 15], "own"]]);
     expect(one?.tasks?.map((t) => t.json)).toEqual([null]);
     expect(cases.find((c) => c.id === at(7, heads.c, heads.base))).toMatchObject({ bugs: [], group: "pr7", large: true });
@@ -1105,8 +1106,19 @@ describe("eval:local carry", () => {
     });
     const to = draft(H2, 2);
     expect(await carry([from, to], diff)).toEqual({ carried: 1, changed: 1, gone: 1, overlap: 0 });
-    expect(to.bugs).toEqual([{ ...bug("moved", "z.ts", [6, 7]), carriedFrom: H1 }]);
+    expect(to.bugs).toEqual([]);
+    expect(to.extras).toEqual([{ path: "z.ts", side: "new", lines: [6, 7], note: "n", carriedFrom: H1 }]);
     expect(to.traps).toEqual([]);
+  });
+
+  test("a carried bug is an extra, also when the later head changes the next line, and keeps its gold fields", async () => {
+    const from = draft(H1, 1, { bugs: [{ ...bug("near", "x.ts", [8, 8]), text: "t", category: "c", source: "posted" }] });
+    const to = draft(H2, 2);
+    expect(await carry([from, to], diff)).toEqual({ carried: 1, changed: 0, gone: 0, overlap: 0 });
+    expect(to.bugs).toEqual([]);
+    expect(to.extras).toEqual([
+      { path: "z.ts", side: "new", lines: [9, 9], note: "n", text: "t", category: "c", source: "posted", carriedFrom: H1 },
+    ]);
   });
 
   test("nothing goes to an earlier head or another PR, and the newest decision on a place wins", async () => {
@@ -1124,7 +1136,8 @@ describe("eval:local carry", () => {
     // A carried bug alone in a later case.
     const solo = draft(H2, 7);
     expect(await carry([earlier, solo], diff)).toEqual({ carried: 1, changed: 0, gone: 0, overlap: 0 });
-    expect(solo.bugs).toEqual([{ ...bug("e", "a.ts", [1, 1]), carriedFrom: H1 }]);
+    expect(solo.bugs).toEqual([]);
+    expect(solo.extras).toEqual([{ path: "a.ts", side: "new", lines: [1, 1], note: "n", carriedFrom: H1 }]);
   });
 });
 

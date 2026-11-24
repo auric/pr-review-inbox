@@ -687,12 +687,16 @@ export function seededCase(
       seedKind: kind,
     };
   });
-  const extra = (x: { note: string; text?: string; category?: string; source?: EvalExtra["source"] }, s: Spot): EvalExtra => ({
+  const extra = (
+    x: { note: string; text?: string; category?: string; source?: EvalExtra["source"]; carriedFrom?: string },
+    s: Spot,
+  ): EvalExtra => ({
     ...move(s),
     note: x.note,
     ...(x.text !== undefined && { text: x.text }),
     ...(x.category !== undefined && { category: x.category }),
     ...(x.source !== undefined && { source: x.source }),
+    ...(x.carriedFrom !== undefined && { carriedFrom: x.carriedFrom }),
   });
   const extras: EvalExtra[] = [
     ...host.extras.map((x) => extra(x, x)),

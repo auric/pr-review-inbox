@@ -600,8 +600,9 @@ export function select(
 // changed: a hunk touches the lines. gone: the later commit deletes the file. overlap: the later case has its own item there.
 export type Carry = { carried: number; changed: number; gone: number; overlap: number };
 
-// A posted finding (a bug) or a trap of a case also counts at each later case of the same PR while its lines hold. Run IDs give the
-// order, so an item never goes to an earlier head. New-side lines move with the diff from head to head, old-side lines with the diff
+// A posted finding (a bug) or a trap of a case also counts at each later case of the same PR while its lines hold. A carried bug is an
+// extra: mapSpot checks only its own lines, so a fix on other lines can close it. A must-find counts only at the head of its decision.
+// Run IDs give the order, so an item never goes to an earlier head. New-side lines move with the diff from head to head, old-side lines with the diff
 // from merge base to merge base (run.ts earlierAt). The newest decision on a place wins, so the newest case gives first. A case gives
 // before it gets, so it gives only its own items. Re-review cases get nothing: their earlier findings are in rereview.earlier, and an
 // item there is a re-raise.
@@ -613,7 +614,7 @@ export async function carry(drafts: Draft[], diff: (from: string, to: string) =>
     for (const to of sorted.toReversed()) {
       if (to.pr !== from.pr || to.first <= from.last) continue;
       const files = { new: await diff(from.head, to.head), old: await diff(from.base, to.base) };
-      const move = <T extends EvalBug | EvalTrap>(list: T[], into: T[]) => {
+      const move = <T extends EvalBug | EvalTrap>(list: T[], put: (x: T, m: Spot) => void) => {
         for (const x of list) {
           const m = mapSpot(files[x.side], x);
           if (!m) {
@@ -621,13 +622,22 @@ export async function carry(drafts: Draft[], diff: (from: string, to: string) =>
             else n.changed++;
           } else if ([...to.bugs, ...to.traps, ...to.human, ...to.extras].some((y) => hit({ ...x, ...m }, y))) n.overlap++;
           else {
-            into.push({ ...x, ...m, carriedFrom: from.head });
+            put(x, { path: m.path, side: x.side, lines: m.lines });
             n.carried++;
           }
         }
       };
-      move(from.bugs, to.bugs);
-      move(from.traps, to.traps);
+      move(from.bugs, (b, m) =>
+        to.extras.push({
+          ...m,
+          note: b.note,
+          ...(b.text !== undefined && { text: b.text }),
+          ...(b.category !== undefined && { category: b.category }),
+          ...(b.source !== undefined && { source: b.source }),
+          carriedFrom: from.head,
+        }),
+      );
+      move(from.traps, (t, m) => to.traps.push({ ...t, ...m, carriedFrom: from.head }));
     }
   }
   return n;
@@ -896,7 +906,7 @@ export type Manifest = {
   sources: Sources;
   // The findings by decision per bug class, category, and module (rules 5). Absent in an older manifest.
   categories: Categories;
-  // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Bugs and traps above include
+  // The items that a case got from an earlier head of the same PR, and those that stayed behind (carry). Extras and traps above include
   // the carried items.
   carried: Carry;
   // The PR threads in the written cases (caseThreads). Absent in a manifest of rules 2. overlap, edited, and earlier: rules 4.
@@ -968,7 +978,7 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
     // avoid ever touched the head. The sync stores the last head and the state of each PR.
     const cleanHead = (d: Draft) => {
       const p = prs.get(d.pr) as PrRow;
-      return !truth(d) && !d.touched && p.state === "MERGED" && p.sourceHead === d.head;
+      return !truth(d) && !d.touched && !d.extras.some((x) => x.carriedFrom) && p.state === "MERGED" && p.sourceHead === d.head;
     };
     const carried: Carry = { carried: 0, changed: 0, gone: 0, overlap: 0 };
     const threadTally = noThreads();

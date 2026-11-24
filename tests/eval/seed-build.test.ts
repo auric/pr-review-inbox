@@ -37,6 +37,7 @@ import {
   ARCH,
   addTargetMerge,
   addTwin,
+  CARRIED_FROM,
   gitIn,
   keptSeed,
   makeNaturalSet,
@@ -892,6 +893,8 @@ describe("seeded set build (sections 6.1 and 8)", () => {
       ["src/other.ts new 38-38", "own"],
     ]);
     expect(c?.traps.map(spot)).toEqual(["src/feature.ts new 53-53"]);
+    // A carried host bug or extra keeps carriedFrom, at each place of the bug.
+    expect(c?.extras?.map((x) => x.carriedFrom ?? null)).toEqual([CARRIED_FROM, CARRIED_FROM, CARRIED_FROM, null]);
     const t = c?.threads ?? [];
     expect(t.map((x) => x.id)).toEqual([1, 2, 5, 6, 7]);
     expect(t.find((x) => x.id === 1)?.lines).toEqual([41, 41]);

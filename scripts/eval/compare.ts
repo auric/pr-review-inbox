@@ -27,6 +27,7 @@ const LABEL: Record<Metric, string> = {
   groundedPrecision: "grounded precision: shown findings that claim a must-find, over those that claim a must-find or a trap",
   groundedNoise: "grounded noise: shown findings that claim no gold item, per case",
   recall: "recall: seeded bugs with a shown finding",
+  nativeRecall: "native recall: bugs decided at the head of the case with a shown finding; carried bugs stay out (old local cases)",
   humanRecall: "human recall: your own inline comments with a shown finding (local set)",
   precision: "precision: shown findings that match a bug or one of your own comments",
   trapRate: "trap rate: shown findings on a trap, per trap",
@@ -64,6 +65,7 @@ const LABEL: Record<Metric, string> = {
 };
 const RATE = new Set<Metric>([
   "recall",
+  "nativeRecall",
   "humanRecall",
   "precision",
   "trapRate",
@@ -107,6 +109,7 @@ const DIGITS: Record<Metric, number> = {
   reRaises: 2,
   verdictOk: 1,
   recall: 1,
+  nativeRecall: 1,
   humanRecall: 1,
   precision: 1,
   trapRate: 1,

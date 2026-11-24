@@ -295,6 +295,7 @@ export const METRICS = [
   "groundedPrecision",
   "groundedNoise",
   "recall",
+  "nativeRecall",
   "humanRecall",
   "precision",
   "trapRate",
@@ -483,6 +484,9 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
 type Tally = {
   bugs: number;
   found: number;
+  // The counted bugs without carriedFrom, and those found. Cases of local rules 5 and older store carried bugs as bugs.
+  native: number;
+  nativeFound: number;
   human: number;
   humanFound: number;
   shown: number;
@@ -579,6 +583,8 @@ function tally(c: EvalCaseInfo, run: CaseRun, t: number, volume: Volume | null, 
   return {
     bugs: bugs.length,
     found: found.length,
+    native: bugs.filter((b) => !b.carriedFrom).length,
+    nativeFound: found.filter((b) => !b.carriedFrom).length,
     human: human.length,
     humanFound: human.filter((h) => shown.some((i) => matches(i, h, t))).length,
     shown: shown.length - extraHits,
@@ -673,6 +679,8 @@ function metrics(ts: Tally[]): Record<Metric, number | null> {
       ts.length,
     ),
     recall: ratio(sum(ts, "found"), sum(ts, "bugs")),
+    // null without a carried bug: it equals recall then.
+    nativeRecall: sum(ts, "native") < sum(ts, "bugs") ? ratio(sum(ts, "nativeFound"), sum(ts, "native")) : null,
     humanRecall: ratio(sum(ts, "humanFound"), sum(ts, "human")),
     precision: ratio(sum(ts, "shownMatched"), sum(ts, "shown")),
     trapRate: ratio(sum(ts, "trapHits"), sum(ts, "traps")),

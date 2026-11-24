@@ -216,6 +216,33 @@ describe("eval score (AC-M1)", () => {
     expect(text).toMatch(/all cases\s+50\.0% \(33\.3% to 66\.7%\)\s+66\.7%\s+\+16\.7 pts/);
     expect(summaryText(RESULT)).toContain("prompt version 1");
   });
+
+  test("native recall leaves out carried bugs, and every other number stays the same", () => {
+    const [a, b] = RESULT.cases as [EvalResult["cases"][number], EvalResult["cases"][number]];
+    const carried: EvalResult = {
+      ...RESULT,
+      cases: [{ ...a, bugs: a.bugs.map((x) => (x.id === "B2" ? { ...x, carriedFrom: "c".repeat(40) } : x)) }, b],
+    };
+    const before = score(RESULT);
+    const after = score(carried);
+    expect(before.suite.nativeRecall).toBeNull();
+    // Repeat 1 finds a/B1 and b/B1. Repeat 2 finds only the carried a/B2.
+    expect(after.suite.nativeRecall).toEqual({ mean: 0.5, min: 0, max: 1 });
+    expect(after.suite.recall).toEqual(before.suite.recall);
+    expect(after.cases.a?.nativeRecall).toEqual({ mean: 0.5, min: 0, max: 1 });
+    expect(after.cases.b?.nativeRecall).toBeNull();
+    const rest = (s: typeof before) =>
+      JSON.stringify({
+        ...s,
+        suite: { ...s.suite, nativeRecall: null },
+        cases: { ...s.cases, a: { ...s.cases.a, nativeRecall: null } },
+        macro: { ...s.macro, nativeRecall: null },
+      });
+    expect(rest(after)).toBe(rest(before));
+    const text = summaryText(carried);
+    expect(text).toMatch(/native recall: bugs decided at the head of the case.*\s+50\.0% \(0\.0% to 100\.0%\)/);
+    expect(text.replace(/\n.*native recall.*/, "")).toBe(summaryText(RESULT).replace(/\n.*native recall.*/, ""));
+  });
 });
 
 describe("opened-file facts (docs/plans/review-v3.md WP-V13)", () => {

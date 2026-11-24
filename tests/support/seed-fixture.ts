@@ -32,6 +32,7 @@ export async function gitIn(env: Record<string, string>, dir: string | null, arg
 
 export const PATHS = { feature: "src/feature.ts", other: "src/other.ts", route: "src/route.ts" } as const;
 export const PR_TITLE = "Add apply to the store";
+export const CARRIED_FROM = "c".repeat(40);
 const lines = (n: number, f: (k: number) => string, eol = "\n") => Array.from({ length: n }, (_, k) => f(k + 1) + eol).join("");
 
 const FEATURE_BLOCK: Record<number, string> = {
@@ -216,10 +217,13 @@ export async function makeNaturalSet(root: string): Promise<NaturalSet> {
         text: "f45 grows twice.",
         category: "logic",
         source: "posted",
+        // A bug that local rules 5 carried from an earlier head.
+        carriedFrom: CARRIED_FROM,
       },
     ],
     traps: [{ id: "item-2", ...spot(PATHS.feature, 52), why: "Not a defect.", text: "f52 is fine.", source: "own" }],
-    extras: [{ ...spot(PATHS.other, 12), note: "A neutral note.", text: "o12 note.", source: "other" }],
+    // A bug that local rules 6 carried from an earlier head.
+    extras: [{ ...spot(PATHS.other, 12), note: "A neutral note.", text: "o12 note.", source: "other", carriedFrom: CARRIED_FROM }],
     human: [{ id: "comment-9", ...spot(PATHS.other, 38), note: "Your comment.", text: "o38 looks odd.", source: "own" }],
     threads: [
       { id: 1, root: 1, author: "reviewer-1", at: 10, text: "Check the order here.", ...spot(PATHS.feature, 40) },

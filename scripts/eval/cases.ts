@@ -87,7 +87,7 @@ export const evalBug = z
   });
 export const evalTrap = z.object({ ...place, why: z.string().min(1), ...gold });
 // A real issue that is no seeded bug. A shown item on it counts for no metric but extras.
-export const evalExtra = z.object({ ...spot, note: z.string().min(1), ...gold });
+export const evalExtra = z.object({ ...spot, note: z.string().min(1), ...gold, carriedFrom: commit.optional() });
 // A finding of the earlier run of a re-review case (docs/plans/review-v3.md WP-V3). The spot is its item anchor at the earlier head.
 // status: its state when the re-review started. open: new or accepted, so the re-review carries it. dropped: discarded, but not by
 // you (the check refuted it, or a fix commit closed it). resolved: posted only, the later state of its thread, or null when no thread
@@ -168,7 +168,7 @@ export const caseFile = z.object({
 });
 // Your own inline comment at a reviewed head (docs/plans/review-v3.md Q1). It must be found, and it scores apart from the bugs.
 export const evalHuman = z.object({ id: z.string().min(1), ...spot, note: z.string().min(1), ...gold });
-export const LOCAL_RULES = 5;
+export const LOCAL_RULES = 6;
 // A case of the local set (docs/plans/review-v3.md WP-V1). A git bundle in ../../bundles/ holds the repository, so the case has no
 // base/ folder and no head.patch. The limits of the fixture sets do not apply. tasks: the pr_task rows with their task_context JSON.
 export const localCaseFile = caseFile.extend({
@@ -183,7 +183,7 @@ export const localCaseFile = caseFile.extend({
   // The version of the must-find rules of local.ts. It is in the case.json text, so a new rule gives a new set fingerprint. 2: the
   // comments of other reviewers count. 3: the case holds its PR threads. 4: the thread cutoff is the run start, and a thread on the
   // lines of a must-find stays out. 5: each item has text and source, the case has group, hasTask, and large, and clean cases exist.
-  // Absent: 1. A case without threads, or a case built before rules 3, has no threads, and run.ts seeds none.
+  // 6: a bug carried from an earlier head is an extra with carriedFrom, not a bug. Absent: 1. A case without threads, or a case built before rules 3, has no threads, and run.ts seeds none.
   rules: z.number().int().min(2).max(LOCAL_RULES).optional(),
   // Rules 5. group: an opaque key of the PR, the same for each case of one PR. hasTask: run.ts seeds task text, so the run gets
   // task.md. large: the diff has REVIEWER_MIN_LINES changed lines or REVIEWER_MIN_FILES files (catalog.ts), whatever the reviewer mode.
