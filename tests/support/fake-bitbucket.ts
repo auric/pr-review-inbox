@@ -123,6 +123,38 @@ type WriteBody = Record<string, unknown> & {
   reviewers?: { user: { name: string } }[];
 };
 
+type ListedPr = { state?: unknown; fromRef: { id: string }; toRef: { id: string } };
+
+// The PR list of a repository: state (default OPEN), and at with direction (OUTGOING matches the source ref, else the target ref).
+function prPage(req: Request, prs: ListedPr[]): Reply {
+  const q = new URL(req.url).searchParams;
+  const at = q.get("at");
+  const values = prs.filter(
+    (p) => p.state === (q.get("state") ?? "OPEN") && (!at || (q.get("direction") === "OUTGOING" ? p.fromRef.id : p.toRef.id) === at),
+  );
+  return { status: 200, body: { size: values.length, limit: Number(q.get("limit") ?? 25), start: 0, isLastPage: true, values } };
+}
+
+// The PR list routes of the repositories of these PR paths (.../repos/<r>/pull-requests/<id>), keyed by route key. Each list reads the
+// GET routes of its PRs at request time, so it shows their current state.
+export function prLists(fake: FakeBitbucket, paths: string[]): Record<string, Route> {
+  const byRepo = Map.groupBy(paths, (p) => p.replace(/\/\d+$/, ""));
+  return Object.fromEntries(
+    [...byRepo].map(([list, prs]) => [
+      key("GET", list),
+      async (req: Request) => {
+        const listed: ListedPr[] = [];
+        for (const p of prs) {
+          const route = fake.routes[key("GET", p)];
+          const reply = typeof route === "function" ? await route(new Request(`${fake.url}${p}`)) : route;
+          if (reply && "status" in reply && reply.status === 200) listed.push(reply.body as ListedPr);
+        }
+        return prPage(req, listed);
+      },
+    ]),
+  );
+}
+
 // The write endpoints of one repository (spec.md section 6.9), shaped as Gates G1 to G6 recorded them (integration-check.md "Review v2").
 // Create: HTTP 201, version 0, state OPEN. The PR author leaves the reviewers without an error (U74). A second open PR of the same refs: 409.
 // PUT and reopen: version + 1, or 409 on a stale version. Build stats: the five keys of Data Center 9.x. writes: each write body.
@@ -265,14 +297,7 @@ export function repoWrites(
     register(pr);
     return { status: 201, body: pr };
   };
-  fake.routes[key("GET", `${path}/pull-requests`)] = (req) => {
-    const q = new URL(req.url).searchParams;
-    const at = q.get("at");
-    const values = [...prs.values()].filter(
-      (p) => p.state === (q.get("state") ?? "OPEN") && (!at || (q.get("direction") === "OUTGOING" ? p.fromRef.id : p.toRef.id) === at),
-    );
-    return { status: 200, body: { size: values.length, limit: Number(q.get("limit") ?? 25), start: 0, isLastPage: true, values } };
-  };
+  fake.routes[key("GET", `${path}/pull-requests`)] = (req) => prPage(req, [...prs.values()]);
   fake.routes[key("GET", "/rest/build-status/1.0/commits/stats/*")] = (req) => {
     const counts = builds.get(new URL(req.url).pathname.split("/").pop() ?? "");
     return { status: 200, body: { successful: 0, inProgress: 0, failed: 0, cancelled: 0, unknown: 0, ...counts } };

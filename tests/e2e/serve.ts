@@ -25,6 +25,7 @@ import {
   type FakeBuild,
   fixture,
   key,
+  prLists,
   type Reply,
   repoWrites,
   startFakeBitbucket,
@@ -519,17 +520,19 @@ r[key("POST", `${A.path}/comments`)] = async (req) => {
 r[key("GET", `${A.path}/comments/1000010`)] = () => (sc.reply === "deleted" ? NOT_FOUND : ok(S.findComment(withReply(), 1000010)));
 
 // ---------- Build a Jira task (docs/plans/review-v2/spec.md section 6.9): the PR create of PROJ1/sample-repo-2 ----------
-// The push goes to the local git remote (repoRemote below). The open-PR list and the repository GET stay absent, as before, so the PR
-// context of the other tests does not change. A created PR gets an empty activity page, so its sync is complete.
+// The push goes to the local git remote (repoRemote below). The repository GET stays absent, as before. The open-PR list shows the
+// inbox PRs of the repository. A created PR gets an empty activity page, so its sync is complete.
 // The default branch of the repository is the target of PR A, so a task builds there (spec.md section 6.16.3). The branch search
 // also lists main and the release base of the local remote, so the base picker has more branches.
 const taskRepo = repoWrites(fake, "PROJ1", "sample-repo-2", {
   defaultBranch: (A.pr.toRef as unknown as { displayId: string }).displayId,
   branches: ["main", RELEASE],
 });
-// The list route comes back only in the sub-task scenario (/__control/subtasks), so the PR context of the other tests does not change.
+// The open-PR lists of the inbox repositories (PR context peers). The created PRs replace the list only in the sub-task scenario
+// (/__control/subtasks).
 const listTaskPrs = r[key("GET", `${taskRepo.path}/pull-requests`)];
-delete r[key("GET", `${taskRepo.path}/pull-requests`)];
+const inboxLists = prLists(fake, [A.path, B.path, C.path, D.path]);
+Object.assign(r, inboxLists);
 delete r[key("GET", taskRepo.path)];
 const createTaskPr = r[key("POST", `${taskRepo.path}/pull-requests`)];
 r[key("POST", `${taskRepo.path}/pull-requests`)] = async (req) => {
@@ -778,10 +781,10 @@ r[key("POST", "/__control/reset")] = async () => {
   fake.requests.length = 0;
   jira.requests.length = 0;
   jira.addIssue(JIRA_ISSUE);
-  // The sub-task scenario: the statuses of the set come back, and the open-PR list of the task repository goes again.
+  // The sub-task scenario: the statuses of the set come back, and the open-PR lists show the inbox PRs again.
   jira.addSubtaskSet();
   jira.transitions.clear();
-  delete r[key("GET", `${taskRepo.path}/pull-requests`)];
+  Object.assign(r, inboxLists);
   Object.assign(folders, { opens: false, paths: [] });
   Object.assign(postA, { fail: null, hide: false });
   setClaude({ stream: "tree" });

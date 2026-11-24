@@ -22,7 +22,16 @@ import { createReviewJobs } from "../src/server/review/jobs";
 import { createSecrets } from "../src/server/secrets";
 import { createSettings } from "../src/server/settings";
 import { createSyncEngine } from "../src/server/sync/engine";
-import { buildStatuses, FAKE_TOKEN, FAKE_USER, fixture, key, repoWrites, startFakeBitbucket } from "../tests/support/fake-bitbucket";
+import {
+  buildStatuses,
+  FAKE_TOKEN,
+  FAKE_USER,
+  fixture,
+  key,
+  prLists,
+  repoWrites,
+  startFakeBitbucket,
+} from "../tests/support/fake-bitbucket";
 import { JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../tests/support/fake-jira";
 import { claudeStream, fakeRunner, REVIEW_RESULT, reviewRemote, stubListTools } from "../tests/support/review-fixture";
 import * as S from "../tests/support/scenarios";
@@ -1039,11 +1048,11 @@ for (const p of [...Object.values(prs), fixing]) {
 const dump = Buffer.concat([Buffer.from("MDMP", "latin1"), Buffer.alloc(4092)]);
 jira.attach("ABC-10688", { id: "10102", filename: "flush-hang.dmp", mimeType: "application/octet-stream", body: dump });
 
-// "Open the PR" of a task (docs/plans/review-v2/spec.md section 6.9): the PR create of PROJ1/sample-repo-4. The open-PR list and the
-// repository GET stay absent, as before, so the PR context of the reviews does not change. A new PR gets an empty activity page.
+// "Open the PR" of a task (docs/plans/review-v2/spec.md section 6.9): the PR create of PROJ1/sample-repo-4. The repository GET stays
+// absent, as before. The open-PR list of each repository shows its demo PRs (PR context peers). A new PR gets an empty activity page.
 // A task builds on the default branch of the repository (spec.md section 6.16.3), the target of the recorded PRs.
 const taskWrites = repoWrites(fake, "PROJ1", "sample-repo-4", { defaultBranch: "topic/sample-4" });
-delete fake.routes[key("GET", `${taskWrites.path}/pull-requests`)];
+Object.assign(fake.routes, prLists(fake, [...activities.keys()].map(pathOf)));
 delete fake.routes[key("GET", taskWrites.path)];
 const createTaskPr = fake.routes[key("POST", `${taskWrites.path}/pull-requests`)];
 fake.routes[key("POST", `${taskWrites.path}/pull-requests`)] = async (req) => {
