@@ -122,6 +122,45 @@ Aggregate numbers only. The local set holds company code, so no case names, path
 - Coverage: in 34 of 34 issue-runs (30 SG-A, 4 pilot), a tool result held the issue hunk. 27 read the whole file. 0 hit a cap. So the misses are judgment, not coverage. A coverage pass, a diff order change, or a cap raise will not help.
 - Origin: all 10 come from findings that the app raised and the user posted (prompts 2.3 to 2.8, Opus at medium effort). For each issue, exactly 1 app run produced a finding in that file. The PRs had 1 to 9 runs.
 - Every posting run had the user's per-PR note. The eval stores an empty note (scripts/eval/run.ts:797). In 3 of 10, the note names the issue file. So these 10 are rare one-off finds, partly helped by the note. They are weak gold for a recall gate.
+- Superseded on 2026-11-24: at least part of these misses is stale gold from carry; see the 2026-11-24 subsection.
 - Position: never-found issues sit later in the diff (median 0.85 of files) than found seeds (0.63). The permutation p is about 0.045, but the items are not independent, so the evidence is weak.
 - Decision (2026-11-23): option 2 stands. The seeded set is a guard. No paid recall gate runs now.
 - Open ideas, not approved: (a) eval fidelity: carry the PR note into the local set, so the eval matches the app. (b) An "oracle look" script (about $3 to $7) gives a fresh run only the file and hunk of each issue. It tests whether focused attention finds them. (c) Fix the codegraph tool-name problem before any codegraph measurement.
+
+### 2026-11-24: oracle look, stale gold from carry, and probe gates SK-P and SM-P
+
+Oracle look (scripts/eval/oracle.ts; not on main yet, it lands with `eval:oracle`):
+
+- Setup: Claude (Opus 5.5, medium) looks at each of the 10 natural issues that no SG-A run found. Two hint levels: the file only, and the file with its lines. Each call repeats 3 times. 10 decoy spots (changed lines with no gold place) test for false claims.
+- Run 1 (2026-11-23, $18.17) used the seeded snapshot. Its decoy rule counted any major finding anywhere in the case.
+- Run 1 re-scored: decoy false claims 0 of 30. All 20 old "false claims" were seeded bugs found elsewhere. The file level is confounded: seeds took 15 of 30 calls.
+- Run 2 (2026-11-24, $20.31) used the natural head without seeds and the fixed decoy rule.
+- Run 2, file level: 3 of 10 issues found in at least 1 of 3 calls, 0 in a majority, 3 of 30 calls.
+- Run 2, lines level: 3 of 10 issues found 3 of 3 times. The other 7 were never found (9 of 30 calls).
+- Run 2, decoys: 0 of 30 calls made a false claim.
+- Judged (one agent's analysis, not mechanical): 5 of the 10 issues are absent at the case head. A later commit in the same PR fixed 4. A spec decision settled 1. On these 5, "no defect" is the correct answer.
+- So 5 misses are live. Exact lines find 3 of them reliably. 2 stay missed: one design judgment that the model made the other way, and one link across files.
+- Reading: exact lines help on 3 of 5 live misses, and they do not make the model invent defects. The file alone helps little. The sample is small, so this is a signal, not a gate.
+
+Stale gold from carry:
+
+- Mechanism: carry() in scripts/eval/local.ts copies a must-find to later heads of the same PR when its anchor lines are unchanged. It does not see fixes in nearby lines or in other files.
+- Mechanical: the natural local set holds 26 carried copies from 13 findings.
+- Mechanical: in the three arms of Joint Gate A, review runs hit the carried copies in 0 of 138 issue-runs. The same findings score 20.8% per run at their origin head.
+- Mechanical: the later case context never holds the posted thread of the origin (0 of 26). So "already posted, so not repeated" does not explain the misses.
+- Mechanical: native-only recall in Gate A (must-finds without carriedFrom) is 31.8% on 55 must-finds in the baseline arm. The recorded figure is 22.4% on 78.
+- Judged (one agent's reading, not verified): 22 of 26 copies sit on code that is already fixed or settled.
+- Judged: live-gold recall for Gate A would be about 31.3% per run (unionRecall(2) 41.1%). For the SG-A natural issues it would be 21.6% per run (recorded 14.7%).
+- A fix exists on a local branch: carry makes extras, the builder gets rule 6, and score and compare get a "native recall" row.
+- The fix is not pushed. It changes the set fingerprint, so a rebuilt set does not compare with the stored Gate A and SG-A results. The user decides.
+
+Probe gates SK-P and SM-P (synthetic cases, commit e4c2764, about $6 in total):
+
+- SK-P (variant "stack") passes on traps (0 over 9 runs), the "relies" must-find (3 of 3 in both arms), and failed runs (0).
+- SK-P cost per case: +1.6% over all cases. On the "relies" case alone it is +27%, because one run cost double. The cost clause of the rule needs the user's reading.
+- SK-P does not discriminate: the control already passes. The case title leaks the child PR into the task summary of the control (scripts/eval/run.ts, about line 837).
+- With the variant, 2 of 3 runs raised an open risk that names the child PR.
+- SM-P (variant "submodules") fails on probe-sub-caller: 0 of 3 in both arms. An app bug causes this, not the model.
+- In all 3 variant runs, the finder raised the must-find with a gitlink cause and an empty quote. The validator dropped it as "unchanged".
+- A fix is built: the judge fills the gitlink quote with "Subproject commit <hash>". A rerun of that case follows after the push.
+- probe-sub-signature: control 2 of 3, variant 3 of 3. Without the variant, runs asked 14 questions over 9 runs and cost twice as much.
