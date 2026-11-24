@@ -600,6 +600,15 @@ export function select(
 // changed: a hunk touches the lines. gone: the later commit deletes the file. overlap: the later case has its own item there.
 export type Carry = { carried: number; changed: number; gone: number; overlap: number };
 
+// An old-side spot names its file by the head path (judge.ts findingItem, the Bitbucket anchor path). A diff that starts at a base names
+// the file by its base path. own: the PR diff from that base to the head of the spot.
+const basePath = (own: DiffFile[], path: string) => own.find((f) => f.path === path)?.oldPath ?? path;
+// mapSpot with s at its base path. A spot that the PR renamed keeps its head path.
+function mapOld(files: DiffFile[], s: { path: string; lines: [number, number] }, head: string) {
+  const m = mapSpot(files, s);
+  return m && s.path !== head ? { path: head, lines: m.lines } : m;
+}
+
 // A posted finding (a bug) or a trap of a case also counts at each later case of the same PR while its lines hold. A carried bug is an
 // extra: mapSpot checks only its own lines, so a fix on other lines can close it. A must-find counts only at the head of its decision.
 // Run IDs give the order, so an item never goes to an earlier head. New-side lines move with the diff from head to head, old-side lines with the diff
@@ -611,14 +620,16 @@ export async function carry(drafts: Draft[], diff: (from: string, to: string) =>
   const hit = (a: Spot, b: Spot) => a.path === b.path && a.side === b.side && overlaps(a.lines, b.lines);
   const sorted = [...drafts].sort((a, b) => b.first - a.first);
   for (const from of sorted) {
+    const own = await diff(from.base, from.head);
     for (const to of sorted.toReversed()) {
       if (to.pr !== from.pr || to.first <= from.last) continue;
       const files = { new: await diff(from.head, to.head), old: await diff(from.base, to.base) };
       const move = <T extends EvalBug | EvalTrap>(list: T[], put: (x: T, m: Spot) => void) => {
         for (const x of list) {
-          const m = mapSpot(files[x.side], x);
+          const at = x.side === "old" ? basePath(own, x.path) : x.path;
+          const m = mapOld(files[x.side], { path: at, lines: x.lines }, x.path);
           if (!m) {
-            if (files[x.side].some((f) => f.oldPath === x.path && f.path === null)) n.gone++;
+            if (files[x.side].some((f) => f.oldPath === at && f.path === null)) n.gone++;
             else n.changed++;
           } else if ([...to.bugs, ...to.traps, ...to.human, ...to.extras].some((y) => hit({ ...x, ...m }, y))) n.overlap++;
           else {
@@ -777,7 +788,8 @@ export function namer(rows: ThreadRow[], me: string, people: Person[]) {
 // that time on, or edited from that time on, did not exist at the review in this form. skip: the item IDs of the case. must: the
 // places of the must-finds of the case. A thread that is a must-find, or on the lines of one, stays out, so the run never reads its
 // own truth. people: every person of the database. earlier: the posted earlier findings by thread root (re-review cases).
-// place: the lines at the reviewed head on the given side, mapped from the given commit, or null when they do not map.
+// place: the lines at the reviewed head on the given side, mapped from the given commit, or null when they do not map. head: the head
+// commit of an old-side spot, whose PR diff gives the base path of a renamed file.
 // People of the PR become EVAL_AUTHOR, EVAL_USER, or reviewer-<n> in first-comment order over the PR, in the author field and in the
 // text. Other people become SOMEONE in the text. Display names change only as stored or capitalized. A first or last name alone
 // changes only for the people of the PR and the user. The first name alone of a person of another PR stays. A root that is deleted but has live replies stays, as pr-context.ts shows it.
@@ -794,6 +806,7 @@ export async function caseThreads(
       s: { path: string; lines: [number, number] },
       from: unknown,
       side: "new" | "old",
+      head?: unknown,
     ) => Promise<{ path: string; lines: [number, number] } | null>;
   },
   n: ThreadTally,
@@ -832,7 +845,12 @@ export async function caseThreads(
     if (spot && spot.line === null) t.where.path = spot.path;
     else if (spot && anchor) {
       const s = { path: spot.path, lines: span(spot.line as number, spot.lineEnd) };
-      const m = await o.place(s, spot.side === "new" ? anchor.toHash : anchor.fromHash, spot.side);
+      const m = await o.place(
+        s,
+        spot.side === "new" ? anchor.toHash : anchor.fromHash,
+        spot.side,
+        spot.side === "old" ? anchor.toHash : undefined,
+      );
       if (!m) Object.assign(t, { where: { path: spot.path }, unplaced: true });
       else {
         Object.assign(t.where, { path: m.path, side: spot.side, lines: m.lines });
@@ -840,7 +858,7 @@ export async function caseThreads(
         let head: { path: string; lines: [number, number] } | null = null;
         if (spot.side === "old" && (hit ? hit.kind === "ctx" : anchor.lineType === "CONTEXT")) {
           t.where.lineType = "CONTEXT";
-          head = await o.place(s, anchor.fromHash, "new");
+          head = await o.place(s, anchor.fromHash, "new", anchor.toHash);
           if (head) t.where.newPlace = head;
         }
         if (onMust({ path: m.path, side: spot.side, lines: m.lines }) || (head && onMust({ ...head, side: "new" }))) {
@@ -1099,10 +1117,12 @@ async function build(o: { db: string; cache: string; out: string; me: string; cl
             const root = e.status === "posted" ? postedRoots.get(Number(e.id.slice("item-".length))) : undefined;
             if (root !== undefined) earlier.set(root, e.id);
           }
-        const place = async (s: { path: string; lines: [number, number] }, from: unknown, side: "new" | "old") => {
+        const place = async (s: { path: string; lines: [number, number] }, from: unknown, side: "new" | "old", head?: unknown) => {
           if (typeof from !== "string" || !COMMIT.test(from)) return null;
           try {
-            return mapSpot(await diff(from, side === "new" ? d.head : d.base), s);
+            const at = typeof head === "string" && COMMIT.test(head) ? basePath(await diff(from, head), s.path) : s.path;
+            const files = await diff(from, side === "new" ? d.head : d.base);
+            return side === "old" ? mapOld(files, { path: at, lines: s.lines }, s.path) : mapSpot(files, { path: at, lines: s.lines });
           } catch {
             return null;
           }

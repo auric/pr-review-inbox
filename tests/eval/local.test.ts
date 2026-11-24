@@ -1139,6 +1139,28 @@ describe("eval:local carry", () => {
     expect(solo.bugs).toEqual([]);
     expect(solo.extras).toEqual([{ path: "a.ts", side: "new", lines: [1, 1], note: "n", carriedFrom: H1 }]);
   });
+
+  test("an old-side item on a file that the PR renamed moves with the base under its head path", async () => {
+    const B2 = "c".repeat(40);
+    const lines = (n: number) => Array.from({ length: n }, (_, k) => `+n${k}`);
+    // The PR renames old-name.txt to new-name.txt. The target branch then adds 7 lines above the item in old-name.txt.
+    const pr = ["diff --git a/old-name.txt b/new-name.txt", "rename from old-name.txt", "rename to new-name.txt", ""].join("\n");
+    const moved = [
+      "diff --git a/old-name.txt b/old-name.txt",
+      "--- a/old-name.txt",
+      "+++ b/old-name.txt",
+      "@@ -5,0 +6,7 @@",
+      ...lines(7),
+      "",
+    ];
+    const diffs: Record<string, string> = { [`${BASE} ${H1}`]: pr, [`${BASE} ${B2}`]: moved.join("\n") };
+    const diff = async (from: string, to: string) => parseDiff(diffs[`${from} ${to}`] ?? "");
+    // judge.ts findingItem stores the head path also for side old.
+    const from = draft(H1, 1, { bugs: [{ ...bug("renamed", "new-name.txt", [20, 22]), side: "old" }] });
+    const to = draft(H2, 2, { base: B2 });
+    expect(await carry([from, to], diff)).toEqual({ carried: 1, changed: 0, gone: 0, overlap: 0 });
+    expect(to.extras).toEqual([{ path: "new-name.txt", side: "old", lines: [27, 29], note: "n", carriedFrom: H1 }]);
+  });
 });
 
 // ---------- Score, compare, and rescore ----------
