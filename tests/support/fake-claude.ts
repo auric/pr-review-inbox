@@ -5,7 +5,7 @@
 // Usage: bun tests/support/fake-claude.ts <scenario.json> <claude arguments>
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type FakeScenario = {
   // Each call appends one JSON line: { argv, env, cwd, stdin, pid, context }. A hang run adds { childPid }.
@@ -97,6 +97,10 @@ export type FakeScenario = {
   // the earlier runs of the same call key that matched it, so runs that start at the same time (spec.md section 6.20.6) get their own
   // entries.
   match?: { when: string; seq: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "bySchema" | "seq" | "match">>[]> }[];
+  // docs/plans/review-v2/thorough-review.md WP-T1c: fields for a run whose run folder name (the parent of the cwd) matches the regex key,
+  // after match. Its bySchema and seq apply after its fields. Its seq counts only the earlier runs of the same call key in the same cwd,
+  // because both arms of a run start in one tick, so the global seq order is not stable.
+  byCwd?: Record<string, Partial<Omit<FakeScenario, "record" | "auth" | "match" | "byCwd">>>;
   // seeded-truth.md WP-SG1: the record of a run gets { files }, the text of every file under the cwd at the start, by path under it.
   files?: boolean;
 };
@@ -422,7 +426,7 @@ async function main() {
   const stdin = first ? (first.done ? "" : messageText(first.value)) : run ? await Bun.stdin.text() : "";
   const key = callKey(args, stdin);
   const list = key ? base.seq?.[key] : undefined;
-  type Rec = { argv?: string[]; stdin?: string; context?: Record<string, string> };
+  type Rec = { argv?: string[]; stdin?: string; cwd?: string; context?: Record<string, string> };
   const same = (r: Rec) => Array.isArray(r.argv) && callKey(r.argv, r.stdin ?? "") === key;
   const earlier = list ? readRecords<Rec>(base.record).filter(same).length : 0;
   // The Markdown files of ./context at the start, by path under it, and the names in ./context/attachments/. A run folder goes away
@@ -436,11 +440,19 @@ async function main() {
   const hit = key ? base.match?.find((m) => holds(context, m.when)) : undefined;
   const mine = hit && key ? hit.seq[key] : undefined;
   const before = mine ? readRecords<Rec>(base.record).filter((r) => same(r) && holds(r.context, hit?.when ?? "")).length : 0;
+  const folder = basename(dirname(process.cwd()));
+  const cwdHit = Object.entries(base.byCwd ?? {}).find(([re]) => new RegExp(re).test(folder))?.[1];
+  const { bySchema: ownSchema, seq: ownSeq, ...own } = cwdHit ?? {};
+  const ownList = key ? ownSeq?.[key] : undefined;
+  const ownBefore = ownList ? readRecords<Rec>(base.record).filter((r) => same(r) && r.cwd === process.cwd()).length : 0;
   const s: FakeScenario = {
     ...base,
     ...(kind ? base.bySchema?.[kind] : undefined),
     ...(list?.length ? list[Math.min(earlier, list.length - 1)] : undefined),
     ...(mine?.length ? mine[Math.min(before, mine.length - 1)] : undefined),
+    ...own,
+    ...(kind ? ownSchema?.[kind] : undefined),
+    ...(ownList?.length ? ownList[Math.min(ownBefore, ownList.length - 1)] : undefined),
   };
   const record = (x: Record<string, unknown>) => appendFileSync(s.record, `${JSON.stringify(x)}\n`);
   const att = join(ctx, "attachments");

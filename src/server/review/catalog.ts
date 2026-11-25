@@ -826,6 +826,9 @@ export const passLabel = (lens: Lens | null) =>
 // One entry per finder pass of a full review. lenses3 wins over runs3.
 export const passLenses = (p: Partial<Pick<Profile, "variants">>): (Lens | null)[] =>
   has(p, "lenses3") ? ["failure", "contract", "system"] : has(p, "runs3") ? [null, null, null] : [null];
+// docs/plans/review-v2/thorough-review.md D6: two arms of a full review with one pass. lenses3 and runs3 win. The caller checks the run
+// kind: a re-review, Explain, and every other run kind keep one run.
+export const twice = (p: Partial<Pick<Profile, "variants">>) => has(p, "twice") && passLenses(p).length === 1;
 // The finder variant lines after the finder rules. A line keeps its first copy, so a stacked variant adds no line twice. With lens null,
 // the lines and their order are those of "callers" and "architecture".
 const focus = (p: Profile, lens: Lens | null) => [

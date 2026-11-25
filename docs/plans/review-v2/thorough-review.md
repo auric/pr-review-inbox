@@ -242,7 +242,7 @@ Unverified:
 - U7. The pass chances in section 4 are rough estimates.
 - U8. Checked in WP-T1a. Section 9 has the results.
 
-## 9. Build notes (WP-T1a)
+## 9. Build notes (WP-T1a, WP-T1c)
 
 Choices that the design left open:
 - Line distance in `copyPairs`: the gap between the two ranges, 0 when they overlap. A gap of at most COPY_LINES pairs.
@@ -261,3 +261,21 @@ U8, the readers of `discardedBy`, verdict "duplicate", and `by`:
 - Wrong words for an app copy, for WP-T2: RunLine.tsx:168 says "The check found the same point in another draft.". model.ts hiddenParts counts it as "1 duplicate". model.ts restoredNote says "A duplicate by the check. You restored it.". context-files.ts:274 says "refuted by the check". The smallest fix is a branch on `verify.by === "app"` in these four texts.
 - Restore: the copy keeps the duplicate mark, so a restored copy reads as unchecked. Its own verdict of its arm is lost. The smallest fix keeps the arm verdict in a new payload field and gives it back on Restore. Not built.
 - Eval (score.ts): a hidden copy gets the state "duplicate". The verifier loss takes the best state of the items that raise an issue. So a copy counts as a loss only when its survivor does not match that issue. That is a false pair (section 7, risk 4).
+
+### WP-T1c
+
+Choices that the design left open:
+- Row A2: arm 2 ends as `failure("workspace", <reason>)`. So mergeRuns adds the J2 line "Run 2 of 2 failed: workspace. Its findings are missing." to coverage skipped. The line "Run 2 of 2 did not start: <reason>" goes to coverage notChecked. The reason is the error text without URLs, on one line.
+- `held.twin` is set right after twinWorkspace returns, before profileServers. So a cancel or an error in profileServers still removes the arm 2 folder.
+- Row J5: a cancel ends the run cancelled after both arms, also when one arm settled before the cancel. That arm result is dropped, as a cancel in the check phase drops the finder result of a one-run review.
+- Each arm passes its find usage (finder plus salvage) to verifyPhase as findUsage. So a cancel in its check keeps its finder usage in the sum. The one-run path does not change.
+- Row A11: the failure of an arm keeps its finder outcome when one exists. So its usage and events count.
+- The salvage line of an arm is the line of a one-run review. mergeRuns joins notChecked without exact duplicates.
+- verifyPhase adds j.candidates, checkQuestions, and checkRisks, and ORs checkObligations. Every other path calls verifyPhase once per job, so its values do not change.
+- Arm 2 uses its own profileServers result: its mcp.json, its MCP lines, and its gaps. The finder prompts are byte-identical when both arms get the same servers.
+- promptVersion has no change. It names every profile variant, so a re-review or a lenses3 run of a profile with "twice" also stores "+twice". lenses3 on a re-review already behaves this way.
+- tests/support/fake-claude.ts gets `byCwd`: fields by a regex on the run folder name. Its seq counts only the earlier runs of one call key in the same cwd.
+- No new test for row J6. Recovery and the first prune are unchanged code. Row A3 and row A9 are part of the J1 test.
+
+Open, outside WP-T1c:
+- Eval replay: replayRefusal refuses a replay that adds or drops "twice", by the finder prompt version. It does not refuse a replay of a "twice" recording with "twice". The recorder numbers the calls of both runners with one counter. The two finder calls get 1 and 2 in arm order, but a salvage call gets its number in end order, which is not stable. So a replay with a salvage call can read the wrong recording. Recording works.

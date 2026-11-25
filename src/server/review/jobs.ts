@@ -111,6 +111,7 @@ import {
   SALVAGE_MAX_TURNS,
   salvageAgent,
   skillLines,
+  twice,
   VERIFIER,
   VERIFY_SPLIT,
   verifierAgent,
@@ -181,6 +182,7 @@ import {
   judgeSession,
   markCopy,
   mergeFound,
+  mergeRuns,
   type PlacedObligations,
   placeAnswers,
   placeObligations,
@@ -250,6 +252,7 @@ import {
   prepareWorkspace,
   pruneWorkspaces,
   type SnapshotRepo,
+  twinWorkspace,
   UNTRUSTED,
   type Workspace,
 } from "./workspace";
@@ -288,6 +291,8 @@ export const verifyMaxTurns = (p: Pick<Profile, "maxTurns">, candidates: number)
 export const DISCUSS_MAX_TURNS = 40;
 // docs/plans/review-v2/jira-context.md section 3.1: one deadline covers all Jira reads at the start of a PR run, the parent reads too.
 export const JIRA_WAIT_MS = 15_000;
+// docs/plans/review-v2/thorough-review.md D4: the first event seq of arm 2. run_event has no unique seq.
+const ARM_SEQ = 1_000_000;
 
 // The source item ID of a carried copy (rereview.ts carryOver).
 const carriedFrom = (it: NewItem) => (JSON.parse(it.payload_json) as { carried?: Carried }).carried?.from;
@@ -364,7 +369,12 @@ type Job = {
   discuss?: DiscussStart;
   // One runner runs one process, so each run has its own.
   runner: Runner;
+  // A run of the variant "twice" only: the runner of arm 2 (docs/plans/review-v2/thorough-review.md D1).
+  twin?: Runner;
 };
+
+// thorough-review.md D1: the run folder, runner, and servers of one arm. gaps: the app lines of its servers and skills.
+type Arm = { ws: Workspace; runner: Runner; mcpServers: Record<string, McpServerSpec>; used: McpUse[]; gaps: string[] };
 
 // docs/plans/review-v2/spec.md section 6.2: one interview or spec run of a task. src/server/tasks builds it.
 // files: context files with the UNTRUSTED banner. own: files that the user wrote or picked, without the banner (answers.md).
@@ -1066,7 +1076,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return { parents, lines };
   }
 
-  async function steps(j: Job, pr: Heads, brief: BriefInput, held: { ws?: Workspace }) {
+  async function steps(j: Job, pr: Heads, brief: BriefInput, held: { ws?: Workspace; twin?: Workspace }) {
     const cancelled = cancelledEnding;
     const reading = startReads(j);
     const c = await check();
@@ -1288,21 +1298,45 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   };
     // docs/plans/review-v2/spec.md section 1.9: a review run shows phase finding, then checking.
     const finder = j.kind === "review" && !profile.explain;
+    // docs/plans/review-v2/thorough-review.md D1: arm 2 gets its snapshot and servers before either finder starts. An index sets the
+    // phase, so this runs before the phase finding. lost: why arm 2 did not start (section 3, row A2).
+    let b: Arm | null = null;
+    let lost: string | null = null;
+    if (finder && !carry && twice(profile)) {
+      j.twin = newRunner();
+      j.abort = new AbortController();
+      try {
+        held.twin = await twinWorkspace(ws, String(j.id), dataDir, { signal: j.abort.signal, timeoutMs: RUN_TIMEOUT_MS });
+        const t = await profileServers(j, profile, held.twin.repo, pr, j);
+        if (!t) return cancelled();
+        const servers = { [GIT_SERVER]: gitMcpServer(held.twin, MAIN_ENTRY), ...t.servers };
+        b = { ws: held.twin, runner: j.twin, mcpServers: servers, used: t.used, gaps: [...t.gaps, ...skills.gaps] };
+      } catch (e) {
+        if (j.cancelled) return cancelled();
+        // One coverage line: git stderr can span lines.
+        lost = noUrl((e as Error).message).replace(/\s+/g, " ");
+        log(`Review run ${j.id}: run 2 of 2 did not start: ${lost}`);
+      } finally {
+        j.abort = undefined;
+      }
+    }
     if (finder) {
       j.phase = "finding";
       notify(j.id);
     }
     const findStart = now();
+    const own: Arm = { ws, runner: j.runner, mcpServers, used, gaps };
     // One finder process. reviewer: the rl-reviewer agent before its languages, skills, and MCP lines. tag: the event tag of a pass.
-    const findRun = (main: AgentSpec, reviewer: AgentSpec, prompt: string, tag = (e: RunEvent) => e) =>
-      j.runner.run(
+    // a: the arm of a run of the variant "twice".
+    const findRun = (main: AgentSpec, reviewer: AgentSpec, prompt: string, tag = (e: RunEvent) => e, a = own) =>
+      a.runner.run(
         {
-          cwd: ws.work,
-          appDir: ws.app,
+          cwd: a.ws.work,
+          appDir: a.ws.app,
           ...spec,
           prompt,
           main: withDelegation(
-            withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), used, finder || explain),
+            withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), a.used, finder || explain),
             delegate,
             parts.length,
           ),
@@ -1319,14 +1353,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
             ? {
                 [REVIEWER]: withInstructions(
                   withInstructions(
-                    withMcp(withSkills(withLanguages(reviewer, langs, !broad(profile)), folders, always), used, finder),
+                    withMcp(withSkills(withLanguages(reviewer, langs, !broad(profile)), folders, always), a.used, finder),
                     instructions.text,
                   ),
                   noteSection(brief.note),
                 ),
               }
             : {},
-          mcpServers,
+          mcpServers: a.mcpServers,
         },
         (events) => {
           j.db.transaction(() => upsertEvents(j.db, j.id, events.map(tag)))();
@@ -1362,14 +1396,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       langs,
       gitlinks: subs?.gitlinks,
     };
-    const settled = (found: Found, find: RunPhase, v: Exclude<Awaited<ReturnType<typeof verifyPhase>>, Ending>) =>
+    const settled = (found: Found, find: RunPhase, v: Exclude<Awaited<ReturnType<typeof verifyPhase>>, Ending>, names = servers) =>
       settle(found, {
         volume: profile.volume,
         find,
         check: v.check,
         verify: v.verify,
         written: v.written,
-        servers,
+        servers: names,
         demote: profile.verifier.outcome === "demote",
         placed: v.placed,
         risks: true,
@@ -1379,6 +1413,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // row, and run slot. A re-review, an Explain run, and every other run kind keep one pass.
     const lenses = finder && !carry ? passLenses(profile) : [null];
     if (lenses.length > 1) {
+      const won = profile.variants.includes("lenses3") ? "lenses3" : "runs3";
+      if (profile.variants.includes("twice")) log(`Review run ${j.id}: the variant twice is off, because ${won} runs its passes.`);
       const n = lenses.length;
       const events: RunEvent[] = [];
       const usable: { k: number; lens: Lens | null; found: Found }[] = [];
@@ -1484,6 +1520,80 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const v = await verifyPhase(j, ws, found.outcome, found, { ...verifyInput, group: true, findUsage: usage });
       if ("status" in v) return v;
       return noted(settled(found, { name: "find", startedAt: findStart, endedAt, usage }, v));
+    }
+    if (b || lost !== null) {
+      const line = `The review reached its turn cap (${profile.maxTurns}). These findings come from its notes so far.`;
+      // thorough-review.md section 3, rows A3 to A11: arm k runs the one-run tail of a full review in its own folder with its own runner.
+      // D4: its event IDs start with pass<k>:, and arm 2 numbers its events from ARM_SEQ.
+      const arm = async (k: number, a: Arm): Promise<Ending> => {
+        const pre = passEvent(k);
+        const offset = k === 1 ? 0 : ARM_SEQ;
+        const at = now();
+        const mark: RunEvent = {
+          id: `${pre}start`,
+          seq: offset,
+          parent: null,
+          tool: "Pass",
+          target: "",
+          status: "ok",
+          note: `Run ${k} of 2.`,
+          agent: null,
+          model: null,
+          tokens: null,
+          builtin: false,
+          startedAt: at,
+          endedAt: at,
+        };
+        const tag = (e: RunEvent): RunEvent => ({
+          ...e,
+          id: pre + e.id,
+          parent: e.parent === null ? null : pre + e.parent,
+          seq: e.seq + offset + 1,
+        });
+        let o: RunOutcome | undefined;
+        try {
+          j.db.transaction(() => upsertEvents(j.db, j.id, [mark]))();
+          const ran = await findRun(spec.main, reviewerAgent(profile, context, parts.length > 0), spec.prompt, tag, a);
+          o = { ...ran, events: [mark, ...ran.events.map(tag)] };
+          let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
+          if (j.cancelled) return cancelled(o);
+          const { used, mcpServers, runner } = a;
+          const s =
+            o.status === "failed" && o.kind === "max_turns"
+              ? await salvagePhase(j, a.ws, o, { profile, input, schema: spec.schema, rereview: null, used, mcpServers, line, runner }, pre)
+              : null;
+          if (s && "status" in s) return s;
+          const names = Object.keys(mcpServers);
+          const judged = await judge(s?.o ?? o, a.ws, profile, names, a.gaps, null, j.asked, instructions.sources, false, subs?.gitlinks);
+          if (s && !("candidates" in judged)) return salvageFailed(o, `The salvage run from its notes failed: ${judged.text}`, s.o);
+          if (!("candidates" in judged)) return judged;
+          const found = s ? salvaged(judged, o, line) : judged;
+          if (s) find = { ...find, endedAt: s.endedAt, usage: addUsage(find.usage, usageOf(s.o)) };
+          const v = await verifyPhase(j, a.ws, s?.o ?? o, found, {
+            ...verifyInput,
+            used,
+            mcpServers,
+            runner,
+            prefix: pre,
+            findUsage: find.usage,
+          });
+          if ("status" in v) return v;
+          return settled(found, find, v, names);
+        } catch (e) {
+          // Row A11: the other arm goes on.
+          const message = (e as Error).message;
+          log(`Review run ${j.id}: run ${k} of 2 failed: ${message}`);
+          return { ...failure("process", message), ...(o && { outcome: o }) };
+        }
+      };
+      // D1: one cancel check, then both finders start with no await between them.
+      if (j.cancelled) return cancelled();
+      const ends = await Promise.all([arm(1, own), b ? arm(2, b) : failure("workspace", lost ?? "")]);
+      const m = mergeRuns(ends, profile.volume);
+      // Row J5: the run ends after both arms, with the usage and the events of both.
+      if (j.cancelled) return { ...cancelledEnding(m.outcome), usage: m.usage ?? null };
+      if (lost !== null) m.result?.summary.coverage.notChecked.push(`Run 2 of 2 did not start: ${lost}`);
+      return m.outcome ? notedBy(m.outcome)(m) : m;
     }
     const o = await findRun(spec.main, reviewerAgent(profile, context, parts.length > 0), spec.prompt);
     let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
@@ -1607,6 +1717,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       used: McpUse[];
       mcpServers: Record<string, McpServerSpec>;
       line: string;
+      // thorough-review.md D1: the runner of an arm. Absent: j.runner.
+      runner?: Runner;
     },
     prefix = "",
     sink: RunEvent[] = [],
@@ -1644,7 +1756,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     notify(j.id);
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return cancelledEnding(o);
-    const s = await j.runner.run(
+    const s = await (r.runner ?? j.runner).run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1697,6 +1809,9 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       findUsage?: RunUsage | null;
       // submodule-prs.md AC-SM8: judge gitlinks, for the findings that the check adds.
       gitlinks?: Gitlinks;
+      // thorough-review.md D1 and D4: the runner of an arm and its event prefix after "check:". Absent: j.runner and none.
+      runner?: Runner;
+      prefix?: string;
     },
   ): Promise<
     | { check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding>; obligations?: PlacedObligations }
@@ -1723,16 +1838,18 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       `Review run ${j.id}: checks ${written} of ${found.candidates.length} candidates, ${asked} of ${found.questions.length} questions, and ${risks} of ${listed.length} risks, ${VERIFIER} ${split ? "on" : "off"}.${obligations ? " It also checks the obligations." : ""}`,
     );
     j.phase = "checking";
-    j.candidates = written;
-    j.checkQuestions = asked;
-    j.checkRisks = risks;
-    j.checkObligations = obligations;
+    // thorough-review.md D4: the counts of both arms add. A run without arms checks once.
+    j.candidates = (j.candidates ?? 0) + written;
+    j.checkQuestions = (j.checkQuestions ?? 0) + asked;
+    j.checkRisks = (j.checkRisks ?? 0) + risks;
+    j.checkObligations ||= obligations;
     notify(j.id);
     const offset = o.events.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
+    const pre = CHECK_EVENT + (r.prefix ?? "");
     const tag = (e: RunEvent): RunEvent => ({
       ...e,
-      id: CHECK_EVENT + e.id,
-      parent: e.parent === null ? null : CHECK_EVENT + e.parent,
+      id: pre + e.id,
+      parent: e.parent === null ? null : pre + e.parent,
       seq: e.seq + offset,
     });
     const verifier = withInstructions(
@@ -1742,7 +1859,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // No await between this check and run(), so a later Cancel reaches the new process.
     if (j.cancelled) return r.findUsage === undefined ? cancelledEnding(o) : { ...cancelledEnding(o), usage: r.findUsage };
     const startedAt = now();
-    const o2 = await j.runner.run(
+    const o2 = await (r.runner ?? j.runner).run(
       {
         cwd: ws.work,
         appDir: ws.app,
@@ -1841,7 +1958,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   }
 
   async function execute(j: Job, pr: Heads, brief: BriefInput) {
-    const held: { ws?: Workspace } = {};
+    // twin: the folder of arm 2 (thorough-review.md D1). steps returns after both arms end, so both folders go after both processes.
+    const held: { ws?: Workspace; twin?: Workspace } = {};
     let e: Ending;
     try {
       e = j.session ? await sessionSteps(j, j.session, pr, held) : await steps(j, pr, brief, held);
@@ -1857,6 +1975,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       e = failure("process", message);
     }
     await held.ws?.remove().catch((err) => log(`Could not remove the workspace of review run ${j.id}: ${noUrl((err as Error).message)}`));
+    await held.twin?.remove();
     // The slot frees in the same tick as the end write. A client that sees the end can start the next run.
     active.delete(j);
     try {
@@ -2326,6 +2445,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         j.cancelled = true;
         j.abort?.abort();
         j.runner.cancel();
+        if ("twin" in j) j.twin?.cancel();
         n++;
       }
     return n > 0;
