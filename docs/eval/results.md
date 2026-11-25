@@ -217,7 +217,7 @@ Variant "callers" (D2), full set, repeat 2, 82 case runs (82 complete, 0 failed)
 
 | Metric | Baseline | callers |
 |---|---|---|
-| Cost per case run | $2.63 | $3.25 (+24%), about $267 total |
+| Cost per case run | $2.63 | $3.25 (+24%), $266.84 total |
 | Minutes per case run | 5.3 | 6.0 |
 | Grounded recall | 38.3% | 35.0% (23 and 19 of 60) |
 | Grounded recall, small cases | 42.1% | 34.2% |
@@ -227,13 +227,13 @@ Variant "callers" (D2), full set, repeat 2, 82 case runs (82 complete, 0 failed)
 | Severity ok | 100% | 91.9% |
 
 - Paired delta of grounded recall: −3.3 points, 90% interval −10.4 to +4.0 (not significant). Labels $5.03.
-- Verdict: "callers" does not ship and stays opt-in. It fails the noise rule on judge fp and costs 24% more.
+- Verdict: "callers" does not ship and stays opt-in. It gives no recall gain and costs 24% more. The judge fp noise rule fails by a small margin (+0.073 against +0.070), so that fail alone is weak evidence.
 
 Variant "lenses3", a fixed 10-case subset chosen before the run, repeat 1, 10 runs (0 failed, 0 incomplete). The control is the same 10 cases of baseline r6 (20 runs):
 
 | Metric | Baseline | lenses3 |
 |---|---|---|
-| Cost per case run | $1.59 | $7.55 (4.8x), about $75.5 total |
+| Cost per case run | $1.59 | $7.55 (4.8x), $75.52 total |
 | Minutes per case run | 4.2 | 15.0 |
 | Grounded recall | 35.7% | 42.9% |
 | Candidate recall | 39.3% | 53.6% |
@@ -248,3 +248,4 @@ Variant "lenses3", a fixed 10-case subset chosen before the run, repeat 1, 10 ru
 - Verdict: lenses3 does not ship and stays opt-in. It costs about 5x and doubles the noise, and the recall gain is not significant.
 - Guess, not measured: many extra findings are judged true, so the must-find list can miss real issues.
 - eval:ab has no command to compare a subset run with the full baseline. A scratch script trimmed the baseline to the subset cases and loaded the baseline labels under the full-set key.
+- eval:compare warns that the profile revisions differ for both variants. The variant alone changes the revision (run.ts profileRevision hashes the variants). The prompts and modules are the same, so the numbers compare.
