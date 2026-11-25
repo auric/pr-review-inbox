@@ -25,12 +25,15 @@ import {
   MORE_CHECKS,
   phaseParts,
   restoredNote,
+  runCopy,
   runningText,
   runsText,
   SHOWN_CHECKS,
   VOLUME_LINE,
 } from "../../src/web/review/model";
 import { problems, toDrafts, toProfiles } from "../../src/web/settings/profiles";
+
+console.log(`review-v2.test.ts imported from ${Bun.resolveSync("../../src/web/review/model", import.meta.dir)}`);
 
 const anchor = { state: "exact" as const, path: "src/cache.ts", oldPath: null, line: 40, lineEnd: 40, excerpt: [] };
 const mark = (verdict: VerifyMark["verdict"], o: Partial<VerifyMark> = {}): VerifyMark => ({
@@ -124,9 +127,10 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     expect(checkChip(back, g.checked)).toBe("Not checked");
     expect(restoredNote(back)).toBe("Refuted by the check. You restored it.");
     expect(restoredNote(finding(9, { verify: mark("duplicate") }))).toBe("A duplicate by the check. You restored it.");
-    expect(restoredNote(finding(9, { verify: mark("duplicate", { by: "app" }) }))).toBe(
-      "The other run of the Thorough review raised the same point. You restored it.",
-    );
+    // A restored copy without its own verdict: the check text names the other run, so the note does not repeat it.
+    const copy = finding(9, { verify: mark("duplicate", { by: "app", evidence: "src/cache.ts:41" }) });
+    expect(restoredNote(copy)).toBe("You restored it.");
+    expect(checkText(copy)).toBe("The other run of the Thorough review raised the same point (src/cache.ts:41).");
     // Hidden, or discarded again by the user: no note.
     expect(restoredNote(SET[5] as ReviewItemDto)).toBeNull();
     expect(restoredNote(finding(10, { verify: mark("refuted") }, { status: "discarded" }))).toBeNull();
@@ -250,6 +254,8 @@ describe("ledger and refuted line", () => {
     ]);
     expect(hiddenParts([copy(20)])).toEqual(["1 repeat of the other run"]);
     const reason = { reason: "Run 1 of 2 raised the same point.", evidence: "src/cache.ts:41", by: "app" };
+    expect(runCopy(copy(20))).toBe(true);
+    expect(runCopy(finding(23, { verify: mark("duplicate") }))).toBe(false);
     expect(checkText(finding(22, { verify: mark("duplicate", reason) }))).toBe(
       "The other run of the Thorough review raised the same point (src/cache.ts:41).",
     );

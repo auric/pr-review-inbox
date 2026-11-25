@@ -258,7 +258,8 @@ U8, the readers of `discardedBy`, verdict "duplicate", and `by`:
 - Review quality (stats.ts): `userDiscard` excludes `discardedBy` "verify", so a hidden copy is no user discard. The counts read `verify.refuted`, `unsure`, and `candidates`, never `duplicates`. `shown` uses displayGroup, so a copy is not shown. Hidden copies do not count as verifier discards. candidates adds both arms.
 - Hidden list, run-rows.ts OPEN_FINDINGS, Restore (items.ts:126-153), and history.ts work unchanged: they key on `discardedBy` "verify".
 - Wrong words for an app copy, for WP-T2: RunLine.tsx:168 says "The check found the same point in another draft.". model.ts hiddenParts counts it as "1 duplicate". model.ts restoredNote says "A duplicate by the check. You restored it.". context-files.ts:274 says "refuted by the check". WP-T2 branches these four texts and checkText on `verify.by === "app"`.
-- Restore: the copy keeps the duplicate mark, so a restored copy reads as unchecked. Its own verdict of its arm is lost. The smallest fix keeps the arm verdict in a new payload field and gives it back on Restore. Not built.
+- Restore: mergeRuns keeps the arm verdict of a copy in `ownVerify`, and Restore puts it back as `verify` for a copy with by "app". A restored copy with its own verdict shows as a normal finding.
+- The "Thorough review:" and "Hidden: " prefixes in RunLine.tsx have no render test. The tests cover only the model texts.
 - Eval (score.ts): a hidden copy gets the state "duplicate". The verifier loss takes the best state of the items that raise an issue. So a copy counts as a loss only when its survivor does not match that issue. That is a false pair (section 7, risk 4).
 
 ### WP-T1c

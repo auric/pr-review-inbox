@@ -262,6 +262,8 @@ export type FindingPayload = AnchoredFinding & {
     fixedBy: number | null;
   };
   verify?: VerifyMark;
+  // thorough-review.md D2: the own check verdict of a copy that mergeRuns hid. Restore puts it back as verify.
+  ownVerify?: VerifyMark;
   finderSeverity?: Severity;
   discardedBy?: "verify";
   demoted?: true;

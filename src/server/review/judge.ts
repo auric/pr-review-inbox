@@ -293,7 +293,7 @@ async function readBlobs(ws: Workspace, findings: Placed[], gitlinks?: Gitlinks)
 function quoteGitlinks<T extends Pick<Finding, "cause">>(findings: T[], gitlinks?: Gitlinks): T[] {
   return findings.map((f) => {
     const c = f.cause;
-    if (!c || c.line !== 1 || collapse(c.anchorText)) return f;
+    if (c?.line !== 1 || collapse(c.anchorText)) return f;
     const p = repoPath(c.path);
     const sha = p === null ? null : gitlinks?.get(p)?.[c.side];
     return sha ? { ...f, cause: { ...c, anchorText: `Subproject commit ${sha}` } } : f;
@@ -1381,6 +1381,7 @@ export function mergeRuns(arms: readonly Ending[], volume: Volume): Ending {
     const p = hide.p;
     const payload: FindingPayload = {
       ...p,
+      ...(p.verify && { ownVerify: p.verify }),
       discardedBy: "verify",
       verify: {
         verdict: "duplicate",

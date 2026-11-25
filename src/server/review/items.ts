@@ -150,8 +150,12 @@ export function triage(db: Database, id: number, input: ItemActionInput, at = Da
         const { session: _, ...rest } = p;
         next.payload_json = JSON.stringify(rest);
       } else if (row.kind === "finding" && p.discardedBy === "verify") {
-        const { discardedBy: _, ...rest } = p;
-        next.payload_json = JSON.stringify(rest);
+        const { discardedBy: _, ...rest } = p as typeof p & Pick<FindingPayload, "verify" | "ownVerify">;
+        // thorough-review.md D2: a restored copy of a Thorough review gets back the verdict of its own run.
+        if (rest.verify?.by === "app" && rest.ownVerify) {
+          const { ownVerify, ...kept } = rest;
+          next.payload_json = JSON.stringify({ ...kept, verify: ownVerify });
+        } else next.payload_json = JSON.stringify(rest);
       } else if (withdrawn) next.payload_json = JSON.stringify({ ...p, withdrawn: { ...withdrawn, restored: true } });
       break;
     }

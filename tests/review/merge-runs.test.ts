@@ -4,8 +4,10 @@
 // docs/plans/review-v2/thorough-review.md WP-T1a: the merge of the two arms of a run of the variant "twice" (D2, D3).
 import { describe, expect, test } from "bun:test";
 import type { RunOutcome } from "../../src/server/review/claude";
+import { triage } from "../../src/server/review/items";
 import { type CandidateLink, type Ending, mergeRuns } from "../../src/server/review/judge";
 import type { NewItem } from "../../src/server/review/run-rows";
+import { openDb } from "../../src/server/storage/db";
 import type { RunPhase, RunSummary, RunUsage } from "../../src/shared/dto";
 import { type CopySpot, copyPairs, type FindingPayload, type Severity, type VerifyMark } from "../../src/shared/review";
 import type { RunEvent } from "../../src/shared/run-log";
@@ -268,9 +270,36 @@ describe("mergeRuns (thorough-review.md D3)", () => {
       duplicateOf: null,
       by: "app",
     });
+    expect(copy.ownVerify).toBeUndefined();
     expect(copy.pass).toBe(2);
     expect(linkOf(m, items[2] as NewItem)).toEqual({ n: 3, duplicateOf: 1 });
     expect(res(m).summary.runs).toEqual({ count: 2, copies: 1 });
+  });
+
+  test("a hidden copy keeps the verdict of its own run as ownVerify; a duplicate of the check gets none", () => {
+    const a = arm({ items: [finding({ line: 10, verdict: "confirmed" })], links: [[0, 1, null]], candidates: 1 });
+    const b = arm({
+      items: [finding({ line: 12, verdict: "confirmed" }), finding({ line: 40, status: "discarded", verdict: "duplicate" })],
+      links: [
+        [0, 1, null],
+        [1, 2, 1],
+      ],
+      candidates: 2,
+    });
+    const items = res(mergeRuns([a, b], "thorough")).items;
+    const copy = pay(items[1] as NewItem);
+    expect(copy.verify?.by).toBe("app");
+    expect(copy.ownVerify).toEqual({
+      verdict: "confirmed",
+      severity: "major",
+      reason: "R",
+      evidence: "e",
+      duplicateOf: null,
+      by: "rl-verify",
+    });
+    const dup = pay(items[2] as NewItem);
+    expect(dup.verify?.by).toBe("rl-verify");
+    expect(dup.ownVerify).toBeUndefined();
   });
 
   test("a survivor without a link gets a number above both arms", () => {
@@ -346,5 +375,45 @@ describe("mergeRuns (thorough-review.md D3)", () => {
     expect(m.result).toBeUndefined();
     expect(m.usage?.costUsd).toBe(3);
     expect(m.outcome?.events.map((e) => e.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("Restore of a hidden copy (thorough-review.md D2)", () => {
+  const own = { verdict: "confirmed", severity: "major", reason: "R", evidence: "e", duplicateOf: null, by: "rl-verify" } as const;
+  const app = { ...own, verdict: "duplicate", reason: "Run 1 of 2 raised the same point.", evidence: "a.ts:10", by: "app" } as const;
+  const restored = (p: object) => {
+    const db = openDb(":memory:");
+    db.run("INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'PROJ', 'repo', 1)");
+    const { id: run } = db
+      .query(
+        `INSERT INTO review_run (pr, kind, profile, profile_name, prompt_version, note, idem_key, source_head, target_head, status, started_at)
+        VALUES (1, 'review', 'general', 'General', '2.9+twice', '', 'k', 'h', 't', 'completed', 1) RETURNING id`,
+      )
+      .get() as { id: number };
+    const { id } = db
+      .query(
+        `INSERT INTO review_item (run, kind, payload_json, body, path, side, line, line_end, status, revision, edited)
+        VALUES ($run, 'finding', $payload, 'b', 'a.ts', 'new', 12, 12, 'discarded', 0, 0) RETURNING id`,
+      )
+      .get({ run, payload: JSON.stringify({ title: "T", body: "B", severity: "major", discardedBy: "verify", ...p }) }) as {
+      id: number;
+    };
+    const r = triage(db, id, { action: "restore", revision: 0 });
+    expect(r).toMatchObject({ status: 200, item: { status: "new" } });
+    const row = db.query("SELECT payload_json FROM review_item WHERE id = $id").get({ id }) as { payload_json: string };
+    return JSON.parse(row.payload_json) as FindingPayload;
+  };
+
+  test("a copy with ownVerify gets its own verdict back as verify", () => {
+    const p = restored({ verify: app, ownVerify: own });
+    expect(p.verify).toEqual(own);
+    expect(p.ownVerify).toBeUndefined();
+    expect(p.discardedBy).toBeUndefined();
+  });
+
+  test("an old copy without ownVerify and a duplicate of the check keep their verify", () => {
+    expect(restored({ verify: app }).verify).toEqual(app);
+    const dup = { ...own, verdict: "duplicate", duplicateOf: 3 } as const;
+    expect(restored({ verify: dup, ownVerify: own })).toMatchObject({ verify: dup, ownVerify: own });
   });
 });

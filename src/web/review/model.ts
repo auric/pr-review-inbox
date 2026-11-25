@@ -710,7 +710,8 @@ export function restoredNote(it: ReviewItemDto): string | null {
     ? "Refuted by the check. You restored it."
     : v === "duplicate"
       ? runCopy(it)
-        ? "The other run of the Thorough review raised the same point. You restored it."
+        ? // checkText already names the other run and the place.
+          "You restored it."
         : "A duplicate by the check. You restored it."
       : null;
 }
