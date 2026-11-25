@@ -249,3 +249,21 @@ Variant "lenses3", a fixed 10-case subset chosen before the run, repeat 1, 10 ru
 - Guess, not measured: many extra findings are judged true, so the must-find list can miss real issues.
 - eval:ab has no command to compare a subset run with the full baseline. A scratch script trimmed the baseline to the subset cases and loaded the baseline labels under the full-set key.
 - eval:compare warns that the profile revisions differ for both variants. The variant alone changes the revision (run.ts profileRevision hashes the variants). The prompts and modules are the same, so the numbers compare.
+
+### 2026-11-25: run the review twice and merge (free analysis of baseline r6)
+
+The two repeats of baseline r6 act as two runs on the same PR. The analysis used the existing judge labels and made no paid run.
+
+| Metric, per case | One run (mean of 2) | Two runs merged, raw | Two runs merged, deduplicated |
+|---|---|---|---|
+| Grounded recall, shown | 38.3% (23/60) | 48.3% (29/60) | 48.3% |
+| Noise | 1.55 | 3.10 | 2.37 |
+| Judge fp | 0.16 | 0.32 | 0.24 |
+| Cost | $2.63 | $5.25 | $5.25 |
+| Minutes, runs in parallel | 5.3 | 6.0 | 6.0 |
+
+- Gain: +10.0 points of grounded recall, 90% case bootstrap interval +5.0 to +15.0. The gain comes from 10 of 41 cases. 11 of the 12 one-run-only must-finds are minor, 1 is major, none is a blocker.
+- Dedup rule: same item hash, same gold key, same must-find, a copied judge label, or a stored matcher match. "Same file, same side, lines within 3" gives about the same result (noise 2.29).
+- Findings that both runs raise match a must-find 2.5 times as often (37.8% against 14.8%). The judge labels both groups true at about the same rate (93% and 91%), so a one-run-only finding is not less trustworthy.
+- Limits: 48.3% is an upper bound, because it assumes a perfect merge. Both runs use the same prompt, so the gain comes from run-to-run variance, not from a better method. A union also lifts any variant.
+- Per dollar, this beats lenses3 (+7.1 points for 4.8x) and callers (−3.3 points for 1.24x).
