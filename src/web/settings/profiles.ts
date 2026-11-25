@@ -74,7 +74,7 @@ export type Draft = {
   volume: ProfileInput["volume"];
   // outcome: what a refuted finding does (spec.md section 1.8).
   verifier: { mode: ProfileInput["verifier"]["mode"]; model: string; effort: Effort | ""; outcome: VerifierOutcome };
-  // docs/plans/review-v3.md WP-V2: eval switches. The editor has controls for "stack" and "submodules" only. A save keeps the others.
+  // docs/plans/review-v3.md WP-V2: eval switches. The editor has controls for "stack", "submodules", and "twice" only. A save keeps the others.
   variants: ProfileInput["variants"];
 };
 
@@ -470,6 +470,7 @@ export type Part =
   | "family"
   | "stack"
   | "submodules"
+  | "twice"
   | "model"
   | "model-id"
   | "effort"

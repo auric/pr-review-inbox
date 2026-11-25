@@ -1077,6 +1077,12 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       // verifier-rule.md AC-R58: refute-issue changes only the verify prompts.
       expect(refusal(["--variants", "refute-issue"])).toBeNull();
       expect(refusal(["--variants", "broad"])).toContain("the recording ran finder prompt version");
+      // thorough-review.md section 9: twice in the recording or in this run is refused, also when both have it.
+      const twice = "a Thorough review (variant twice) cannot replay";
+      expect(refusal(["--variants", "twice"])).toContain(twice);
+      const twiceRec = { ...a, promptVersion: `${a.promptVersion}+twice`, profile: { ...a.profile, variants: ["twice"] } };
+      expect(refusal([], twiceRec)).toContain(twice);
+      expect(refusal(["--variants", "twice"], twiceRec)).toContain(twice);
       expect(refusal(["--variants", "verify2"], { ...a, promptVersion: `${a.promptVersion}+broad` })).toContain(
         `the recording ran finder prompt version ${a.promptVersion}+broad`,
       );

@@ -34,7 +34,9 @@ import {
   type RunLineState,
   relatedWarnings,
   risksLabel,
+  runCopy,
   runningText,
+  runsText,
   setupText,
   shortHash,
   skillsText,
@@ -165,7 +167,7 @@ export function Refuted({
                   </span>
                 </p>
                 <p className="m-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                  {f.verify?.verdict === "duplicate" ? "The check found the same point in another draft. " : ""}
+                  {runCopy(it) ? "Hidden: " : f.verify?.verdict === "duplicate" ? "The check found the same point in another draft. " : ""}
                   <Inline text={checkText(it) ?? "The check gave no reason."} />
                 </p>
                 {/* items.ts refuses Restore for a finding without an anchor: a re-review found its code gone. */}
@@ -319,6 +321,7 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
   const state = `${run.id}:${s.kind}:${s.kind === "running" ? (run.phase ?? "") : ""}`;
   const failedCheck = review && s.kind === "done" ? checkFailedText(run.summary) : null;
   const phases = review && s.kind === "done" ? phaseParts(run.summary) : [];
+  const runs = runsText(run.summary);
   const at = run.finishedAt ?? run.startedAt;
   // The log footer also shows the tokens. Here they stay in the hint.
   const tokens =
@@ -644,6 +647,11 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
           {phases.length > 0 && (
             <li data-run-phases>
               <span className="text-muted-foreground">Steps:</span> {phaseParts(run.summary, true).join("; ")}
+            </li>
+          )}
+          {runs && (
+            <li data-run-twice>
+              <span className="text-muted-foreground">Thorough review:</span> {runs}
             </li>
           )}
           {run.consult && (

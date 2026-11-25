@@ -26,6 +26,7 @@ import {
   phaseParts,
   restoredNote,
   runningText,
+  runsText,
   SHOWN_CHECKS,
   VOLUME_LINE,
 } from "../../src/web/review/model";
@@ -123,6 +124,9 @@ describe("display groups per volume (spec.md section 1.4)", () => {
     expect(checkChip(back, g.checked)).toBe("Not checked");
     expect(restoredNote(back)).toBe("Refuted by the check. You restored it.");
     expect(restoredNote(finding(9, { verify: mark("duplicate") }))).toBe("A duplicate by the check. You restored it.");
+    expect(restoredNote(finding(9, { verify: mark("duplicate", { by: "app" }) }))).toBe(
+      "The other run of the Thorough review raised the same point. You restored it.",
+    );
     // Hidden, or discarded again by the user: no note.
     expect(restoredNote(SET[5] as ReviewItemDto)).toBeNull();
     expect(restoredNote(finding(10, { verify: mark("refuted") }, { status: "discarded" }))).toBeNull();
@@ -237,6 +241,25 @@ describe("ledger and refuted line", () => {
     expect(hiddenParts(groupsOf("balanced").hidden)).toEqual(["1 refuted by the check", "1 duplicate"]);
     expect(hiddenParts([SET[5] as ReviewItemDto, SET[5] as ReviewItemDto])).toEqual(["2 refuted by the check"]);
     expect(hiddenParts([])).toEqual([]);
+    // thorough-review.md D2: a copy that mergeRuns hid is no duplicate by the check.
+    const copy = (id: number) => finding(id, { verify: mark("duplicate", { by: "app" }) }, { status: "discarded" });
+    expect(hiddenParts([...groupsOf("balanced").hidden, copy(20), copy(21)])).toEqual([
+      "1 refuted by the check",
+      "1 duplicate",
+      "2 repeats of the other run",
+    ]);
+    expect(hiddenParts([copy(20)])).toEqual(["1 repeat of the other run"]);
+    const reason = { reason: "Run 1 of 2 raised the same point.", evidence: "src/cache.ts:41", by: "app" };
+    expect(checkText(finding(22, { verify: mark("duplicate", reason) }))).toBe(
+      "The other run of the Thorough review raised the same point (src/cache.ts:41).",
+    );
+  });
+
+  test("the Run setup line of a Thorough review counts its hidden copies (thorough-review.md D5)", () => {
+    expect(runsText(summary({ runs: { count: 2, copies: 3 } }))).toBe("2 runs at once. 3 repeated findings hidden.");
+    expect(runsText(summary({ runs: { count: 2, copies: 1 } }))).toBe("2 runs at once. 1 repeated finding hidden.");
+    expect(runsText(summary())).toBeNull();
+    expect(runsText(null)).toBeNull();
   });
 
   test("the run result leaves out the refuted points; a complete v2 run without findings names the checked areas", () => {

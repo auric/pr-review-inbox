@@ -119,7 +119,7 @@ export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_N
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
 --notes gives each local case the PR note of its source run, as the app did. Without it, each run has an empty note.
 --ordinals prints "case 1", "case 2" in place of the case IDs, and no error or coverage text of a run. The result file keeps them.
-Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup.
+Each run records its CLI calls in <result>.calls/. --replay-find takes the finder and salvage calls from the recording of that result and runs only the verify calls. It refuses a change of the finder setup and the variant twice.
 --resume continues a cut result and writes to that file. It keeps the completed and incomplete runs and runs the other case runs. It refuses a change of the run setup.`;
 
 export type Options = {
@@ -327,6 +327,10 @@ export function replayRefusal(rec: EvalResult, o: Options, profile: Profile): st
   if (!!rec.requested?.notes !== o.notes) return `${it}: the recording ran ${o.notes ? "without" : "with"} --notes.`;
   if ((rec.set ?? "v1") !== o.set) return `${it}: the recording ran set ${rec.set ?? "v1"}, but this run has set ${o.set}.`;
   if (o.repeat > rec.repeat) return `${it}: the recording has ${rec.repeat} repeats, but this run asks for ${o.repeat}.`;
+  // thorough-review.md section 9: the recorder numbers a salvage call of "twice" in end order, so a replay can read the wrong call.
+  const twice = (v: unknown) => Array.isArray(v) && v.includes("twice");
+  if (twice(rec.profile.variants) || twice(profile.variants))
+    return `${it}: a Thorough review (variant twice) cannot replay. Its salvage calls have no stable order.`;
   const was = finderVersion(rec.promptVersion);
   const now = finderVersion(promptVersion(profile));
   if (was !== now) return `${it}: the recording ran finder prompt version ${was}, but this run has ${now}.`;

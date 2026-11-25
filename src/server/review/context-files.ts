@@ -270,8 +270,11 @@ function capped(blocks: string[][], max: number, left: (n: number) => string): {
 // withdrawn: the mark of a discuss run (spec.md section 2.2).
 function findingState(r: ItemRow): string {
   if (r.status !== "discarded") return r.status;
-  const p = JSON.parse(r.payload_json) as { discardedBy?: string; withdrawn?: unknown };
-  return p.discardedBy === "verify" ? "refuted by the check" : p.withdrawn ? "withdrawn in a talk" : "discarded by the user";
+  const p = JSON.parse(r.payload_json) as { discardedBy?: string; withdrawn?: unknown; verify?: { by?: string } };
+  // thorough-review.md D2: verify.by "app" marks a copy that mergeRuns hid.
+  if (p.discardedBy === "verify")
+    return p.verify?.by === "app" ? "hidden, the other run of the Thorough review raised the same point" : "refuted by the check";
+  return p.withdrawn ? "withdrawn in a talk" : "discarded by the user";
 }
 
 // docs/plans/review-v2/spec.md section 2.4: context/finding.md of a discuss run. The block of findingsFile, as a fix run sees the

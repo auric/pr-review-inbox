@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Review profiles: the new switch "Thorough review" runs a full review twice at once and merges the findings. A point that both runs raise shows once. It uses about twice the Claude usage.
 - Review profiles: the new switch "Stacked PRs" gives a review run the parent and child PRs of a stacked PR. The new switch "Submodule changes" gives a review run the commits of each moved submodule. Both are off by default.
 - Review: Ctrl+Enter on the "Include <file> in runs" switch of an attachment now starts the review and keeps the file included. Before, it also turned the attachment off, so the run got no attachment.
 - Notes: "Waits for PR" now also takes a pull request of another repository. Write "PROJ/repo#45" or paste the pull request link. A bad value or a link of another server shows an error under the field.

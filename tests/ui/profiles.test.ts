@@ -457,12 +457,14 @@ describe("the no flag choice", () => {
   });
 });
 
-describe("stack and submodules switches", () => {
+describe("stack, submodules, and twice switches", () => {
   test("withVariant changes only its own name and keeps the VARIANTS order", () => {
     expect(withVariant(["runs3", "codegraph"], "stack", true)).toEqual(["codegraph", "runs3", "stack"]);
     expect(withVariant(["codegraph", "stack", "submodules"], "stack", false)).toEqual(["codegraph", "submodules"]);
     expect(withVariant([], "submodules", false)).toEqual([]);
     expect(withVariant(["submodules"], "submodules", true)).toEqual(["submodules"]);
+    expect(withVariant(["verify2", "stack"], "twice", true)).toEqual(["stack", "twice", "verify2"]);
+    expect(withVariant(["twice", "verify2"], "twice", false)).toEqual(["verify2"]);
   });
 
   test("an edit of the switch saves the server form, so the saved list compares equal", () => {

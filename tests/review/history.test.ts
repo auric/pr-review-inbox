@@ -175,6 +175,11 @@ describe("historyFile", () => {
       ["discarded", "discarded by the user"],
       ["posted", "posted"],
       ["discarded", "refuted by the check", { discardedBy: "verify" }],
+      [
+        "discarded",
+        "hidden, the other run of the Thorough review raised the same point",
+        { discardedBy: "verify", verify: { verdict: "duplicate", by: "app" } },
+      ],
       ["discarded", "withdrawn in a talk", { withdrawn: { run: 9, reason: "R", was: "new" } }],
       // Restore after a talk keeps the mark, and the status names the state again.
       ["new", "new", { withdrawn: { run: 9, reason: "R", was: "new" } }],

@@ -695,6 +695,8 @@ export const checkChip = (it: ReviewItemDto, checked: boolean) =>
 export function checkText(it: ReviewItemDto): string | null {
   const v = (it.payload as FindingPayload).verify;
   if (!v?.reason.trim()) return null;
+  if (runCopy(it))
+    return `The other run of the Thorough review raised the same point${v.evidence.trim() ? ` (${v.evidence.trim()})` : ""}.`;
   return `Check: ${v.reason.trim()}${v.evidence.trim() ? ` (${v.evidence.trim()})` : ""}`;
 }
 
@@ -707,9 +709,18 @@ export function restoredNote(it: ReviewItemDto): string | null {
   return v === "refuted"
     ? "Refuted by the check. You restored it."
     : v === "duplicate"
-      ? "A duplicate by the check. You restored it."
+      ? runCopy(it)
+        ? "The other run of the Thorough review raised the same point. You restored it."
+        : "A duplicate by the check. You restored it."
       : null;
 }
+
+// docs/plans/review-v2/thorough-review.md D2: mergeRuns marks a hidden copy with verify.by "app", not the check.
+export const runCopy = (it: ReviewItemDto) => (it.payload as FindingPayload).verify?.by === "app";
+
+// thorough-review.md D5: the Run setup line of a Thorough review. null: a one-run review.
+export const runsText = (s: RunSummary | null | undefined) =>
+  s?.runs ? `${s.runs.count} runs at once. ${plural(s.runs.copies, "repeated finding")} hidden.` : null;
 
 // The title of a draft row. A finding from before review v2 has no title, so the row shows its body.
 export const draftTitle = (it: ReviewItemDto) => (it.kind === "finding" && (it.payload as FindingPayload).title?.trim()) || it.body;
@@ -746,11 +757,16 @@ export function ledgerParts(g: DraftGroups, qs: { n: number; first: number } | n
   ];
 }
 
-// spec.md section 1.1: "3 refuted by the check", "1 duplicate". Empty: none.
+// spec.md section 1.1: "3 refuted by the check", "1 duplicate", "2 repeats of the other run". Empty: none.
 export function hiddenParts(hidden: ReviewItemDto[]): string[] {
-  const dup = hidden.filter((i) => (i.payload as FindingPayload).verify?.verdict === "duplicate").length;
-  const refuted = hidden.length - dup;
-  return [refuted ? `${refuted} refuted by the check` : "", dup ? plural(dup, "duplicate") : ""].filter(Boolean);
+  const copies = hidden.filter(runCopy).length;
+  const dup = hidden.filter((i) => (i.payload as FindingPayload).verify?.verdict === "duplicate").length - copies;
+  const refuted = hidden.length - dup - copies;
+  return [
+    refuted ? `${refuted} refuted by the check` : "",
+    dup ? plural(dup, "duplicate") : "",
+    copies ? `${plural(copies, "repeat")} of the other run` : "",
+  ].filter(Boolean);
 }
 
 // docs/plans/review-v2/review-questions.md: the finder questions that the check answered. They are not posted. null: none, or a

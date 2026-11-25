@@ -828,6 +828,13 @@ function ProfileRow(rowProps: RowProps) {
           checked={d.variants.includes("submodules")}
           onChange={(on) => edit({ variants: withVariant(d.variants, "submodules", on) })}
         />
+        <Toggle
+          id={profileId(i, "twice")}
+          label={<>Thorough review{of}</>}
+          help="Runs the review twice at once and merges the findings. About twice the usage. Full reviews only."
+          checked={d.variants.includes("twice")}
+          onChange={(on) => edit({ variants: withVariant(d.variants, "twice", on) })}
+        />
       </div>
       <ChecksField {...props} />
       <RunSetup {...props} found={found} />

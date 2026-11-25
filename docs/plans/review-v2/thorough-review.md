@@ -1,6 +1,6 @@
 # Thorough review: the review twice, merged (variant "twice")
 
-Status: design of 2026-11-25 against main d89870f. WP-T0 (docs) and WP-T1a (merge) are built. Nothing calls mergeRuns yet, so runs do not change. WP-T1b, WP-T1c, and WP-T2 are not started. User decision of 2026-11-25: build an opt-in profile switch "Thorough review", off by default. For this switch only, it replaces focused-passes.md section 11 question 2 and the section 9 rows "Parallel passes in three worktrees" and "App-side fuzzy dedupe across anchors". The text names no case ID, host, path, or project. Open questions are in section 8.
+Status: built and shipped opt-in on 2026-11-25. WP-T0, WP-T1a, WP-T1b, WP-T1c, and WP-T2 are built. Gate T-0 and Gate T-P pass. The user decided on 2026-11-25 to ship without Gate T-A (Q2). The profile switch "Thorough review" is off by default. For this switch only, it replaces focused-passes.md section 11 question 2 and the section 9 rows "Parallel passes in three worktrees" and "App-side fuzzy dedupe across anchors". The text names no case ID, host, path, or project.
 
 ## 0. Short answer
 
@@ -8,7 +8,7 @@ Status: design of 2026-11-25 against main d89870f. WP-T0 (docs) and WP-T1a (merg
 - Arm B gets its own snapshot: a second detached worktree of the same head and a copy of the other run files. Each arm has its own cwd, app folder, and runner.
 - After both arms end, the pure function `mergeRuns` joins the two settled results. It hides a second copy of one point: same path, same side, ranges within 3 lines, one to one.
 - A re-review, Explain, a task review, and every other run kind keep one run. lenses3 and runs3 win over twice.
-- Shipping the UI switch depends on the gate choice of section 4 (the user decides).
+- The UI switch "Thorough review" shipped after Gate T-0 and Gate T-P (section 4).
 
 ## 1. Evidence
 
@@ -159,8 +159,9 @@ Gate T-0, free, after WP-T1a:
 
 Gate T-P, paid pilot: two small natural cases, repeat 1, `--variants twice`. Estimate: $6-15.
 - Pass: both case runs finish. Each case run has 2 find calls and 2 verify calls, plus any salvage calls. The events hold `pass1:`, `pass2:`, `check:pass1:`, and `check:pass2:`. No runs/<id>-2 folder stays. The cost factor against r6 on the same cases is 1.6 to 2.4. The minutes factor is at most 1.4.
+- Result (2026-11-25): PASS. Both case runs completed. Each case run had 2 find calls and 2 verify calls. Cost factor 2.26 and 1.97 against the baseline mean of the same case. Minutes factor 1.05 and 1.04. Each case hid 3 copies. Shown must-finds 2/4 and 2/5, against baseline 2-3 of 4 and 2-3 of 5. Two cases show no quality difference. The eval keeps no app events, so only tests/review/twice.test.ts checks the D4 event prefixes.
 
-Gate T-A, paid, optional (the user decides): the natural set r6 (41 cases), effort medium, repeat 1, about $221 with labels.
+Gate T-A, paid, optional: not run (Q2). The design was: the natural set r6 (41 cases), effort medium, repeat 1, about $221 with labels.
 
 ```
 REVIEW_LOOP_EVAL_LOCAL=<natural set r6> bun run eval -- --real --set local --repeat 1 --effort medium --variants twice --out eval-results/natural-r6/twice
@@ -191,7 +192,7 @@ WP-T1c, wiring (implementer-xhigh): src/server/review/jobs.ts (Job `twin`, `canc
 - Control mutations: one shared cwd fails the cwd test; no twin cancel fails the cancel test.
 - Acceptance: `bun run check` green; existing jobs tests pass with no edit.
 
-Gate T-P (paid, user approves), then Gate T-A if the user picks it.
+Gate T-P (paid, user approves). Gate T-A does not run (Q2).
 
 WP-T2, ship: src/web/settings/profiles.ts (Part "twice"), ReviewProfiles.tsx (Toggle, help "Runs the review twice at once and merges the findings. About twice the usage. Full reviews only."), src/web/review/model.ts and RunLine.tsx (D5 setup line), tests/ui/profiles.test.ts, a model test, README.md (profile switches, "Runs at once" note), CHANGELOG.md, `bun run screenshots`, review-ledger.md (shipped opt-in).
 
@@ -228,9 +229,7 @@ Decisions of 2026-11-25:
 - Q1. Slot: one slot with two processes. The main session decided this default.
 - Q4. When the arm B snapshot fails, the run goes on with arm A and ends incomplete.
 - Q5. Label: keep "Thorough review" with the ID "twice". The volume value `thorough` (BRIEF.md:485) shows as "Show everything" (src/web/review/model.ts:638), so the visible words do not clash.
-
-Questions for the user:
-- Q2. Gate T-A: run it (about $221) with the limits of section 4, or ship after T-0 and T-P? Open.
+- Q2. Gate T-A: the user decided to ship after Gate T-0 and Gate T-P. Gate T-A does not run.
 
 Unverified:
 - U1. Two CLI processes write the CLI global files (~/.claude.json) at the same time. The shipped app already runs up to 3 `claude` processes at once by default ("Runs at once", src/shared/task.ts:96). So two arms add no new kind of risk. Gate G-PAR stays open (parallel-runs.md section 2).
@@ -238,7 +237,7 @@ Unverified:
 - U3. The arm B snapshot time. Estimate: below the mean setup time of 0.25 min per r6 run.
 - U4. The 7.3 min and 10 min times are estimates from phase times.
 - U5. Two codegraph indexes of one repository at once.
-- U6. How the UI shows `by: "app"` on a hidden copy. Section 9 lists the texts that WP-T2 must change.
+- U6. Built in WP-T2: the texts of section 9 branch on `verify.by === "app"`.
 - U7. The pass chances in section 4 are rough estimates.
 - U8. Checked in WP-T1a. Section 9 has the results.
 
@@ -258,7 +257,7 @@ U8, the readers of `discardedBy`, verdict "duplicate", and `by`:
 - No zod parser reads a stored `verify` mark. `VerifyMark.by` is a TypeScript `string`, and no code compares it. context-files.ts prints it as text ("duplicate by app").
 - Review quality (stats.ts): `userDiscard` excludes `discardedBy` "verify", so a hidden copy is no user discard. The counts read `verify.refuted`, `unsure`, and `candidates`, never `duplicates`. `shown` uses displayGroup, so a copy is not shown. Hidden copies do not count as verifier discards. candidates adds both arms.
 - Hidden list, run-rows.ts OPEN_FINDINGS, Restore (items.ts:126-153), and history.ts work unchanged: they key on `discardedBy` "verify".
-- Wrong words for an app copy, for WP-T2: RunLine.tsx:168 says "The check found the same point in another draft.". model.ts hiddenParts counts it as "1 duplicate". model.ts restoredNote says "A duplicate by the check. You restored it.". context-files.ts:274 says "refuted by the check". The smallest fix is a branch on `verify.by === "app"` in these four texts.
+- Wrong words for an app copy, for WP-T2: RunLine.tsx:168 says "The check found the same point in another draft.". model.ts hiddenParts counts it as "1 duplicate". model.ts restoredNote says "A duplicate by the check. You restored it.". context-files.ts:274 says "refuted by the check". WP-T2 branches these four texts and checkText on `verify.by === "app"`.
 - Restore: the copy keeps the duplicate mark, so a restored copy reads as unchecked. Its own verdict of its arm is lost. The smallest fix keeps the arm verdict in a new payload field and gives it back on Restore. Not built.
 - Eval (score.ts): a hidden copy gets the state "duplicate". The verifier loss takes the best state of the items that raise an issue. So a copy counts as a loss only when its survivor does not match that issue. That is a false pair (section 7, risk 4).
 
@@ -277,5 +276,5 @@ Choices that the design left open:
 - tests/support/fake-claude.ts gets `byCwd`: fields by a regex on the run folder name. Its seq counts only the earlier runs of one call key in the same cwd.
 - No new test for row J6. Recovery and the first prune are unchanged code. Row A3 and row A9 are part of the J1 test.
 
-Open, outside WP-T1c:
-- Eval replay: replayRefusal refuses a replay that adds or drops "twice", by the finder prompt version. It does not refuse a replay of a "twice" recording with "twice". The recorder numbers the calls of both runners with one counter. The two finder calls get 1 and 2 in arm order, but a salvage call gets its number in end order, which is not stable. So a replay with a salvage call can read the wrong recording. Recording works.
+Eval replay (built in WP-T2): replayRefusal refuses every replay when the recording or the replay profile has "twice".
+- Before WP-T2, replayRefusal refused only a replay that adds or drops "twice", by the finder prompt version. The recorder numbers the calls of both runners with one counter. The two finder calls get 1 and 2 in arm order, but a salvage call gets its number in end order, which is not stable. So a replay with a salvage call can read the wrong recording. Recording works.

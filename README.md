@@ -97,6 +97,8 @@ The checks add checklists to the review: Security, Threads and races, Performanc
 
 "Stacked PRs" and "Submodule changes" are off by default. With "Stacked PRs" on, a review run of a PR that is stacked on another open PR gets the parent and child PRs and can read the parent change. With "Submodule changes" on, a review run of a PR that moves a submodule gets the commits of the moved submodule. Both apply to review runs only.
 
+"Thorough review" is off by default. With it on, a full review runs twice at once and merges the findings. When both runs raise the same point, the app shows it once and hides the other copy. Run setup shows "Thorough review: 2 runs at once" and the number of hidden copies. It uses about twice the Claude usage. A re-review, Explain, and every other run kind run once.
+
 ![Settings, Review profiles: the prompt, the checks, and the volume](docs/screenshots/settings-profiles.webp)
 
 The review brief holds the task, your note, the checks, and the volume: "Only what matters", "Balanced", or "Show everything". A change of a check or of the volume saves to the profile at once. The profile picker shows when you have two or more review profiles. Explain has its own page. A review starts only from the brief.
@@ -226,7 +228,7 @@ Settings, Tasks has "Run limits". Each value applies to runs that start after th
 - "Plan turns": the plan run stops after this number of turns. Default 80, from 20 to 500.
 - "Session context cap": when the Claude session of a task part has a larger context, its next run starts a new session. Default 100,000 tokens, from 20,000 to 500,000.
 - "Session run turns": one Claude run of a task part stops after this number of turns, and the app continues it once by itself. Default 500, from 50 to 1000.
-- "Runs at once": Claude runs at most this number of runs at the same time. Reviews, Explain, Ask, Fix, and task steps share it. Default 3, from 1 to 10. Builds of 2 or more sub-tasks at once run beside it. More runs use your Claude usage faster.
+- "Runs at once": Claude runs at most this number of runs at the same time. Reviews, Explain, Ask, Fix, and task steps share it. Default 3, from 1 to 10. Builds of 2 or more sub-tasks at once run beside it. More runs use your Claude usage faster. One Thorough review uses one slot but runs two Claude processes.
 
 Each pull request has one run at a time. While a run works on a pull request, these buttons of that pull request are off and say why: Start review, Ask, the Explain button, "Propose fixes for <n>" in the Fix list, Ask in the talk of a finding, and "Ask the session". An example: "Claude is reviewing this pull request. One run per pull request." When every slot is in use, the same buttons of the other pull requests are off too. Their note names the limit and up to 3 running runs, for example "Claude runs 3 runs at once, your limit. Running: Review of PROJ/repo #12, Ask of PROJ/repo #14, and Build step of ABC-7." The buttons come back when a run ends. Another start, such as Draft replies, that finds no free slot says so in a message. A task step that finds every slot in use waits with "Waiting for a free run slot" and starts when a run ends.
 
