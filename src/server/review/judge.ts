@@ -17,10 +17,12 @@ import {
   MAX_NOTE,
   type ObligationOutcome,
   type Obligations,
+  obligationOutcomes,
   type RiskOutcome,
   type RunPhase,
   type RunSummary,
   type RunUsage,
+  riskOutcomes,
   type VerifySummary,
   type Volume,
 } from "../../shared/dto";
@@ -28,10 +30,13 @@ import {
   type AnchoredFinding,
   askResult,
   type Check,
+  checkOf,
   confidences,
+  copyPairs,
   type Defect,
   type DiscussResult,
   discussResult,
+  displayGroup,
   type ExplainResult,
   explainResult,
   type Finding,
@@ -1280,6 +1285,194 @@ export function mergeFound(
     questions: list.flatMap((x) => x.found.questions),
     replies: list.find((x) => x.k === 1)?.found.replies ?? [],
     gaps: uniq([...list.flatMap((x) => x.found.gaps), ...extra.gaps]),
+  };
+}
+
+// docs/plans/review-v2/thorough-review.md D2 and D3: one Ending from the settled arms of a run of the variant "twice", in arm order.
+// An arm is usable when it has a result. A shown finding of the second usable arm that repeats one of the first hides as a duplicate.
+export function mergeRuns(arms: readonly Ending[], volume: Volume): Ending {
+  const n = arms.length;
+  const usage = arms.reduce<RunUsage | null>(
+    (u, e) => addUsage(u, e.usage !== undefined ? e.usage : e.outcome ? usageOf(e.outcome) : null),
+    null,
+  );
+  const events = arms.flatMap((e) => e.outcome?.events ?? []);
+  const raw = cap(arms.map((e, i) => `# Run ${i + 1} of ${n}\n\n${e.raw}`).join("\n"));
+  const usable = arms.flatMap((e, i) => (e.result && (e.status === "completed" || e.status === "incomplete") ? [{ k: i + 1, e }] : []));
+  const head = usable[0];
+  if (!head) {
+    const a = arms[0] as Ending;
+    return { ...a, raw, ...(a.outcome && { outcome: { ...a.outcome, events } }), usage };
+  }
+  const gaps = arms.flatMap((e, i) =>
+    usable.some((u) => u.k === i + 1) ? [] : [`Run ${i + 1} of ${n} failed: ${e.kind ?? e.status}. Its findings are missing.`],
+  );
+  // Each arm numbers its candidates from 1. A later arm moves up by the numbers of the arms before it.
+  type Shown = { k: number; at: number; p: FindingPayload };
+  const items: NewItem[] = [];
+  const links = new Map<NewItem, CandidateLink>();
+  const shown: Shown[][] = [];
+  let base = 0;
+  let risksBefore = 0;
+  for (const { k, e } of usable) {
+    const r = e.result as NonNullable<Ending["result"]>;
+    const own = r.links ?? new Map<NewItem, CandidateLink>();
+    const list: Shown[] = [];
+    let top = r.summary.verify?.candidates ?? 0;
+    for (const it of r.items) {
+      if (it.kind === "reply" && k !== head.k) continue;
+      let next = it;
+      if (it.kind === "finding") {
+        const p = JSON.parse(it.payload_json) as FindingPayload;
+        const q: FindingPayload = { ...p, pass: k, ...(p.fromRisk !== undefined && { fromRisk: p.fromRisk + risksBefore }) };
+        next = { ...it, payload_json: JSON.stringify(q) };
+        // D2: a demoted refuted finding has status new, but it takes no part.
+        if (it.status === "new" && p.verify?.verdict !== "refuted") list.push({ k, at: items.length, p: q });
+      }
+      const l = own.get(it);
+      if (l) {
+        links.set(next, { n: l.n + base, duplicateOf: l.duplicateOf === null ? null : l.duplicateOf + base });
+        top = Math.max(top, l.n, l.duplicateOf ?? 0);
+      }
+      items.push(next);
+    }
+    shown.push(list);
+    base += top;
+    risksBefore += r.summary.finderRisks?.list.length ?? 0;
+  }
+  // D2, the survivor: the main group, then the higher severity, then the better check, then the earlier arm.
+  const rank = (p: FindingPayload) => [
+    displayGroup(p, volume) === "main" ? 0 : 1,
+    severities.indexOf(p.severity),
+    CHECK_ORDER.indexOf(checkOf(p)),
+  ];
+  const better = (x: FindingPayload, y: FindingPayload) => {
+    const a = rank(x);
+    const b = rank(y);
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return (a[i] as number) < (b[i] as number);
+    return true;
+  };
+  const spot = (s: Shown) => {
+    const it = items[s.at] as NewItem;
+    return {
+      path: it.path ?? "",
+      side: s.p.side,
+      line: it.line ?? 0,
+      lineEnd: it.line_end,
+      preexisting: s.p.preexisting,
+      polish: s.p.polish,
+    };
+  };
+  const [first = [], second = []] = shown;
+  const pairs = copyPairs(first.map(spot), second.map(spot));
+  const numberOf = (it: NewItem) => {
+    const l = links.get(it);
+    if (l) return l.n;
+    links.set(it, { n: ++base, duplicateOf: null });
+    return base;
+  };
+  for (const [i, j] of pairs) {
+    const x = first[i] as Shown;
+    const y = second[j] as Shown;
+    const [keep, hide] = better(x.p, y.p) ? [x, y] : [y, x];
+    const kept = items[keep.at] as NewItem;
+    const old = items[hide.at] as NewItem;
+    const target = numberOf(kept);
+    const p = hide.p;
+    const payload: FindingPayload = {
+      ...p,
+      discardedBy: "verify",
+      verify: {
+        verdict: "duplicate",
+        severity: p.severity,
+        reason: `Run ${keep.k} of ${n} raised the same point.`,
+        evidence: `${kept.path}:${kept.line}`,
+        duplicateOf: null,
+        by: "app",
+      },
+    };
+    const copy: NewItem = { ...old, status: "discarded", payload_json: JSON.stringify(payload) };
+    links.set(copy, { n: links.get(old)?.n ?? ++base, duplicateOf: target });
+    links.delete(old);
+    items[hide.at] = copy;
+  }
+  const summaries = usable.map((u) => (u.e.result as NonNullable<Ending["result"]>).summary);
+  const uniq = (xs: string[]) => [...new Set(xs)];
+  const cov = summaries.map((s) => s.coverage);
+  // The first present value with each count key added across the arms. undefined: no arm has it.
+  const add = <T extends object>(list: (T | undefined)[], keys: readonly (keyof T)[]): T | undefined => {
+    const got = list.filter((x): x is T => x !== undefined);
+    if (!got.length) return undefined;
+    const out = { ...(got[0] as T) };
+    for (const key of keys) (out as Record<keyof T, unknown>)[key] = got.reduce((t: number, x) => t + Number(x[key]), 0);
+    return out;
+  };
+  const verify = add(
+    summaries.map((s) => s.verify),
+    ["candidates", "confirmed", "refuted", "unsure", "questions", "duplicates", "unchecked"],
+  );
+  if (verify) {
+    const failed = summaries.find((s) => s.verify?.failed)?.verify?.failed;
+    delete verify.failed;
+    if (failed) verify.failed = failed;
+  }
+  const finderQuestions = add(
+    summaries.map((s) => s.finderQuestions),
+    ["asked", "answered", "findings", "kept"],
+  );
+  if (finderQuestions) finderQuestions.answers = summaries.flatMap((s) => s.finderQuestions?.answers ?? []);
+  const finderRisks = add(
+    summaries.map((s) => s.finderRisks),
+    ["listed", ...riskOutcomes],
+  );
+  if (finderRisks) finderRisks.list = summaries.flatMap((s) => s.finderRisks?.list ?? []);
+  const obligations = add(
+    summaries.map((s) => s.obligations),
+    ["listed", ...obligationOutcomes],
+  );
+  if (obligations) obligations.list = summaries.flatMap((s) => s.obligations?.list ?? []);
+  const phase = (name: RunPhase["name"]): RunPhase[] => {
+    const list = summaries.flatMap((s) => s.phases?.filter((p) => p.name === name) ?? []);
+    if (!list.length) return [];
+    const ends = list.map((p) => p.endedAt);
+    return [
+      {
+        name,
+        startedAt: Math.min(...list.map((p) => p.startedAt)),
+        endedAt: ends.includes(null) ? null : Math.max(...(ends as number[])),
+        usage: list.reduce<RunUsage | null>((u, p) => addUsage(u, p.usage), null),
+      },
+    ];
+  };
+  const phases = [...phase("find"), ...phase("check")];
+  const lead = summaries[0] as RunSummary;
+  const summary: RunSummary = {
+    summary: lead.summary,
+    risks: summaries.flatMap((s) => s.risks),
+    coverage: {
+      read: uniq(cov.flatMap((c) => c.read)),
+      skipped: uniq([...cov.flatMap((c) => c.skipped), ...gaps]),
+      unavailable: uniq(cov.flatMap((c) => c.unavailable)),
+      notChecked: uniq(cov.flatMap((c) => c.notChecked)),
+    },
+    dropped: summaries.flatMap((s) => s.dropped),
+    volume,
+    ...(verify && { verify }),
+    ...(phases.length > 0 && { phases }),
+    ...(finderQuestions && { finderQuestions }),
+    ...(finderRisks && { finderRisks }),
+    ...(obligations && { obligations }),
+    runs: { count: 2, copies: pairs.length },
+  };
+  const incomplete = gaps.length > 0 || usable.some((u) => u.e.status === "incomplete");
+  return {
+    status: incomplete ? "incomplete" : "completed",
+    kind: null,
+    text: null,
+    raw,
+    ...(head.e.outcome && { outcome: { ...head.e.outcome, events } }),
+    usage,
+    result: { summary, items, links },
   };
 }
 

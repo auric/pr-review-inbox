@@ -215,8 +215,9 @@ export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // docs/plans/review-v2/minor-fold.md WP-MF1. "refute-issue": docs/plans/review-v2/verifier-rule.md WP-VR1. "architecture":
 // docs/plans/review-v2/architecture-bugs.md WP-AR1. "lenses3" and "runs3": docs/plans/review-v2/focused-passes.md WP-L1. "codegraph":
 // docs/plans/review-v3.md WP-V5, an app-run CodeGraph server on the snapshot. "stack": docs/plans/review-v2/stacked-prs.md WP-SK1.
-// "submodules": docs/plans/review-v2/submodule-prs.md WP-SM2. A retired name ("signal", "order", "rules2", "rereview-strict",
-// "preexisting", "risk-check") drops on read. Prompt 2.9 ships "preexisting" and "risk-check" as defaults.
+// "submodules": docs/plans/review-v2/submodule-prs.md WP-SM2. "twice": docs/plans/review-v2/thorough-review.md WP-T1a. A retired
+// name ("signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check") drops on read. Prompt 2.9 ships "preexisting"
+// and "risk-check" as defaults.
 export const VARIANTS = [
   "architecture",
   "broad",
@@ -233,6 +234,7 @@ export const VARIANTS = [
   "security2-verify",
   "stack",
   "submodules",
+  "twice",
   "verify2",
 ] as const;
 export type Variant = (typeof VARIANTS)[number];
@@ -642,6 +644,9 @@ export type RunSummary = Pick<ValidatedResult, "summary" | "risks" | "coverage" 
   finderQuestions?: FinderQuestions;
   finderRisks?: FinderRisks;
   obligations?: Obligations;
+  // docs/plans/review-v2/thorough-review.md D3: a run of the variant "twice". copies: the findings that the merge hid as copies.
+  // Absent: a one-run review.
+  runs?: { count: 2; copies: number };
 };
 // docs/plans/review-v2/review-questions.md: the finder questions of a review run. asked = answered + findings + kept. answered: the
 // check found the answer, which answers holds. findings: the answer showed a defect. Absent in runs before prompt version 2.7.

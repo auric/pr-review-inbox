@@ -435,7 +435,7 @@ Then:
 ## 11. Questions and decisions
 
 1. With union passes, the 10% grounded noise limit counts true findings outside the seeds. Keep it for lenses3 and runs3? Decided by the user on 2026-11-21: keep the 10% limit, and print the judge-tp and judge-fp parts. If only the judge-tp part fails, the blind audit of section 5.5 decides. It takes 20 items and passes at 60% real bugs.
-2. Run passes in parallel in separate worktrees to cut minutes? Decided by the user on 2026-11-21: no parallel passes until something ships.
+2. Run passes in parallel in separate worktrees to cut minutes? Decided by the user on 2026-11-21: no parallel passes until something ships. For the variant "twice" only, thorough-review.md replaces this decision (user, 2026-11-25).
 3. Redefine runs3 as three identical passes with no order files and no merge agent? Decided by the user on 2026-11-21: keep the design. It is the control. runs3 differs from lenses3 in the lens text and ARCHITECTURE_VERIFY (section 4.7). It is not "one difference from the normal review". runs3 gets no architecture verify lines.
 4. Run runs3 when G-L0 fails? Decided by the user on 2026-11-21: no. Compare lenses3 with the SG-A union(3) number for information only.
 5. When the direct interval includes 0, which one ships? Decided by the user on 2026-11-21: lenses3 ships only when its cost is less than 10% above runs3. The architecture benefit is a preference, not evidence.

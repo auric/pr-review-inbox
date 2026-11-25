@@ -3150,7 +3150,7 @@ usage (first reason or part row):
 ### 6.26 Several Claude runs at once (docs/plans/review-v2/parallel-runs.md, limits.md decision 1)
 
 - Run pool: at most `runLimits.runsAtOnce` pool runs at the same time (default 3, 1 to 10). Every PR run and every task run of a task with one part at a time is a pool run. Steps of a task with 2 or more parts at once and Improve prompt run beside the pool.
-- One run per pull request. A user start never waits; a full pool gives 409. Each run has its own CLI runner. `worktree add` and `worktree prune` of each run folder run under the per-cache lock.
+- One run per pull request. A user start never waits; a full pool gives 409. Each run has its own CLI runner. A run of the opt-in variant "twice" (designed, not wired) has two runners in one slot (thorough-review.md D1 and D5). `worktree add` and `worktree prune` of each run folder run under the per-cache lock.
 - Start order: the same key first (A14: 200 and the running run), then a running run on the same PR (409, no `full`), then the limit (409 with `full`). Every start path is synchronous from the check to the slot.
 - 409 texts: the PR has a running run: "A run is working on this pull request. Start yours when it ends." Full pool, oldest run on a PR: "Claude runs <N> runs at once, your limit. Start yours when one ends." Full pool, oldest run a task step: "Claude is building <KEY>. Start your run when its step ends." (AC-B18). `RunConflict.full` holds N for a full pool.
 - A waiting task step wakes when any pool slot frees; a step that loses the race waits again. With the limit 1 the step texts stay. With the limit 2 or more: "Waiting for a free run slot. Claude runs <N> runs at once, your limit." The task row status: "Waiting for a free run slot".

@@ -302,6 +302,37 @@ export function displayGroup(
   return "main";
 }
 
+// docs/plans/review-v2/thorough-review.md D2: two findings of two runs are one point when path, side, preexisting, and polish are equal
+// and the ranges overlap after one range grows by COPY_LINES at each end. The eval uses the same rule.
+export const COPY_LINES = 3;
+export type CopySpot = { path: string; side: Side; line: number; lineEnd: number | null; preexisting?: boolean; polish?: boolean };
+
+// One to one, a to b only. Each b spot in order takes the unpaired a spot with the smallest gap between the ranges (0 when they
+// overlap), then the first in order. Returns [a index, b index] in b order.
+export function copyPairs(a: readonly CopySpot[], b: readonly CopySpot[]): [number, number][] {
+  const gap = (x: CopySpot, y: CopySpot) => Math.max(0, y.line - (x.lineEnd ?? x.line), x.line - (y.lineEnd ?? y.line));
+  const same = (x: CopySpot, y: CopySpot) =>
+    x.path === y.path &&
+    x.side === y.side &&
+    (x.preexisting === true) === (y.preexisting === true) &&
+    (x.polish === true) === (y.polish === true);
+  const used = new Set<number>();
+  const pairs: [number, number][] = [];
+  for (const [j, y] of b.entries()) {
+    let best: { i: number; d: number } | null = null;
+    for (const [i, x] of a.entries()) {
+      if (used.has(i) || !same(x, y)) continue;
+      const d = gap(x, y);
+      if (d <= COPY_LINES && (best === null || d < best.d)) best = { i, d };
+    }
+    if (best) {
+      used.add(best.i);
+      pairs.push([best.i, j]);
+    }
+  }
+  return pairs;
+}
+
 // spec.md section 1.8: the bug classes in the order of the finder rule (catalog.ts finderRules). The categories are the finder rule
 // and the words of the languages.ts items of each class. The modules are the check sections of a class.
 const BUG_CLASSES: readonly { modules: readonly string[]; categories: readonly string[] }[] = [
