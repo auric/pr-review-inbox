@@ -18,7 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { parseDiff } from "../../src/server/review/diffmap";
-import { git, gitEnv } from "../../src/server/review/git";
+import { GitError, git, gitEnv } from "../../src/server/review/git";
 import {
   type AttachmentFile,
   type ContextFile,
@@ -31,6 +31,7 @@ import {
   pruneWorkspaces,
   sanitize,
   syncCache,
+  twinWorkspace,
   UNTRUSTED,
   type Workspace,
   WorkspaceError,
@@ -973,6 +974,84 @@ describe("workspace", () => {
       expect(await worktrees(s, cache)).toHaveLength(4);
       await Promise.all(all.map((ws) => ws.remove()));
       expect(await worktrees(s, cache)).toHaveLength(1);
+    },
+    SLOW,
+  );
+});
+
+describe("twinWorkspace (thorough-review.md WP-T1b)", () => {
+  const HOSTILE: Record<string, Entry> = {
+    "link-out": { link: "../../outside" },
+    ".claude/settings.json": '{"hooks":{}}',
+    ".mcp.json": "{}",
+    "CLAUDE.md": "root rules",
+    "pkg/Agents.MD": "nested agent rules",
+    "src/new.ts": "new\n",
+  };
+
+  test(
+    "the twin has the sanitized head tree and copies of the other work entries",
+    async () => {
+      const s = await scenario("twin", HOSTILE);
+      const ws = await prepare(s, "7");
+      mkdirSync(join(ws.work, "skills", "a"), { recursive: true });
+      writeFileSync(join(ws.work, "skills", "a", "SKILL.md"), "skill");
+      writeFileSync(join(ws.work, "CLAUDE.md"), "app rules");
+      const twin = await twinWorkspace(ws, "7", s.dataDir);
+      expect(twin.run).toBe(join(realpathSync.native(s.dataDir), "runs", "7-2"));
+      expect(twin.repo).toBe(join(twin.work, "repo"));
+      expect(twin.context).toBe(join(twin.work, "context"));
+      expect([twin.sourceHead, twin.cache, twin.diff, twin.mergeBase]).toEqual([ws.sourceHead, ws.cache, ws.diff, ws.mergeBase]);
+      expect(tree(twin.repo)).toEqual(tree(ws.repo));
+      expect(tree(twin.repo)).not.toContain("link-out");
+      expect(tree(twin.repo)).toContain("CLAUDE.untrusted.md");
+      expect(tree(twin.repo)).toContain("pkg/Agents.untrusted.md");
+      expect(readFileSync(join(twin.repo, "src", "new.ts"), "utf8")).toBe("new\n");
+      expect(tree(twin.work).filter((p) => !p.startsWith("repo"))).toEqual(tree(ws.work).filter((p) => !p.startsWith("repo")));
+      writeFileSync(join(twin.context, "pr.md"), "changed");
+      writeFileSync(join(twin.work, "skills", "a", "SKILL.md"), "changed");
+      writeFileSync(join(twin.work, "CLAUDE.md"), "changed");
+      expect(readFileSync(join(ws.context, "pr.md"), "utf8")).toStartWith(UNTRUSTED);
+      expect(readFileSync(join(ws.work, "skills", "a", "SKILL.md"), "utf8")).toBe("skill");
+      expect(readFileSync(join(ws.work, "CLAUDE.md"), "utf8")).toBe("app rules");
+      expect(await worktrees(s, ws.cache)).toHaveLength(3);
+      await twin.remove();
+      expect(existsSync(twin.run)).toBe(false);
+      expect(existsSync(ws.repo)).toBe(true);
+      expect(await worktrees(s, ws.cache)).toHaveLength(2);
+      await ws.remove();
+    },
+    SLOW,
+  );
+
+  test(
+    "an aborted signal stops the add and leaves no folder",
+    async () => {
+      const s = await scenario("twin-abort", { "src/new.ts": "new\n" });
+      const ws = await prepare(s, "8");
+      const stop = new AbortController();
+      stop.abort();
+      const e = await twinWorkspace(ws, "8", s.dataDir, { signal: stop.signal }).catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(GitError);
+      expect((e as GitError).stopped).toBe(true);
+      expect(existsSync(join(realpathSync.native(s.dataDir), "runs", "8-2"))).toBe(false);
+      expect(await worktrees(s, ws.cache)).toHaveLength(2);
+      await ws.remove();
+    },
+    SLOW,
+  );
+
+  test(
+    "pruneWorkspaces after an app stop removes runs/<id> and runs/<id>-2 and their worktree entries",
+    async () => {
+      const s = await scenario("twin-prune", { "src/new.ts": "new\n" });
+      const ws = await prepare(s, "9");
+      const twin = await twinWorkspace(ws, "9", s.dataDir);
+      expect(await worktrees(s, ws.cache)).toHaveLength(3);
+      await pruneWorkspaces(s.dataDir);
+      expect(existsSync(ws.run)).toBe(false);
+      expect(existsSync(twin.run)).toBe(false);
+      expect(await worktrees(s, ws.cache)).toHaveLength(1);
     },
     SLOW,
   );

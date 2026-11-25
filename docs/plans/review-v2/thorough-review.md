@@ -155,6 +155,7 @@ Gate T-0, free, after WP-T1a:
 - A scratch script reads the two r6 repeats and their labels. It applies `copyPairs` and the survivor rule to the stored items.
 - It tests the dedup rule on the same data as the +10-point estimate, not the gain.
 - Pass: grounded shown recall of at least 28 of 60 (the raw union shows 29), and grounded noise of at most 2.5 per case.
+- Result (2026-11-25): PASS. Merged recall 29/60, grounded noise 2.49 per case (limit 2.5, margin one item), judge fp 0.29 per case. The merge hid 46 pairs and lost no must-find. Scored with score.ts, which counts a second hit on one bug as noise, so the raw union shows 3.49 here against 3.10 in docs/eval/results.md.
 
 Gate T-P, paid pilot: two small natural cases, repeat 1, `--variants twice`. Estimate: $6-15.
 - Pass: both case runs finish. Each case run has 2 find calls and 2 verify calls, plus any salvage calls. The events hold `pass1:`, `pass2:`, `check:pass1:`, and `check:pass2:`. No runs/<id>-2 folder stays. The cost factor against r6 on the same cases is 1.6 to 2.4. The minutes factor is at most 1.4.

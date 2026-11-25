@@ -4,7 +4,7 @@
 // The sanitized, pinned work folder of one review run (plan v3 WP6). The layout matches claude.ts:
 // <dataDir>/runs/<id>/work/{repo,context} is the CLI cwd, <dataDir>/runs/<id>/app holds the app files.
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { lstat, readdir, rename, rm } from "node:fs/promises";
+import { cp, lstat, readdir, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { indentBlock, oneLine } from "../../shared/consult";
 import { RUN_TEXT_BYTES } from "../../shared/dto";
@@ -499,11 +499,7 @@ export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace
     mkdirSync(context, { recursive: true });
     mkdirSync(app, { recursive: true });
     await locked(cache, () => git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, pr.sourceHead], { env, ...input.long }));
-    const links = (await g(["ls-tree", "-r", "-z", "--full-tree", pr.sourceHead]))
-      .split("\0")
-      .filter((r) => r.startsWith("120000 "))
-      .map((r) => r.slice(r.indexOf("\t") + 1));
-    await sanitize(repo, links);
+    await sanitize(repo, await linksAt(cache, env, pr.sourceHead));
 
     const rangeBase = input.since === undefined ? mergeBase : ((await rangeBaseOf(g, input.since, mergeBase)) ?? mergeBase);
     const diff = await g(["diff", ...diffArgs, mergeBase, pr.sourceHead]);
@@ -512,6 +508,38 @@ export async function prepareWorkspace(input: WorkspaceInput): Promise<Workspace
     if (attachments.length) await copyAttachments(join(dataDir, "attachments"), join(context, "attachments"), attachments);
     const heads = { sourceHead: pr.sourceHead, targetHead: pr.targetHead };
     return { run, work, repo, context, app, cache, ...heads, mergeBase, rangeBase, parentBase, via, diff, keep, remove };
+  } catch (e) {
+    await remove();
+    throw e;
+  }
+}
+
+// thorough-review.md D1: a second run folder runs/<runId>-2 with a sanitized worktree of ws.sourceHead and a copy of every other entry
+// of ws.work. Nothing is fetched, so both folders show one head.
+export async function twinWorkspace(ws: Workspace, runId: string, dataDir: string, long: LongGit = {}): Promise<Workspace> {
+  const run = join(longData(dataDir), "runs", `${name(runId, "run ID")}-2`);
+  const work = join(run, "work");
+  const repo = join(work, "repo");
+  const app = join(run, "app");
+  const { cache, sourceHead } = ws;
+  const { env } = gitSetup(longData(dataDir));
+  const remove = async () => {
+    try {
+      await rm(run, RM_TREE);
+      await locked(cache, () => git([`--git-dir=${cache}`, "worktree", "prune"], { env }));
+    } catch (e) {
+      log(`Could not remove the run folder ${run}: ${(e as Error).message}`);
+    }
+  };
+  await remove();
+  try {
+    mkdirSync(work, { recursive: true });
+    mkdirSync(app, { recursive: true });
+    await locked(cache, () => git([`--git-dir=${cache}`, "worktree", "add", "--detach", repo, sourceHead], { env, ...long }));
+    await sanitize(repo, await linksAt(cache, env, sourceHead));
+    for (const f of await readdir(ws.work))
+      if (f !== "repo") await cp(join(ws.work, f), join(work, f), { recursive: true, verbatimSymlinks: true });
+    return { ...ws, run, work, repo, context: join(work, "context"), app, remove };
   } catch (e) {
     await remove();
     throw e;
