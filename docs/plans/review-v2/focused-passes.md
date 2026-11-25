@@ -1,6 +1,6 @@
 # Focused passes: three finder runs with different lenses (variant "lenses3")
 
-Status: design of 2026-11-21 against main 484a4e5. WP-L0, WP-L1, and WP-L2 are built opt-in (section 12). The user decided section 11 on 2026-11-21. WP-AR1 is pushed (bb1afd0). G-L0 failed on SG-A (2026-11-23), so runs3 does not run. lenses3 waits for a natural-set baseline, pending the user (section 5.3). Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
+Status: design of 2026-11-21 against main 484a4e5. WP-L0, WP-L1, and WP-L2 are built opt-in (section 12). The user decided section 11 on 2026-11-21. WP-AR1 is pushed (bb1afd0). G-L0 failed on SG-A (2026-11-23), so runs3 does not run. lenses3 failed the noise rule on the natural set (2026-11-25, section 5.3) and stays opt-in. Packages: WP-L0 (docs), WP-L1 (passes in the app), WP-L2 (eval diagnostics). Paid steps: pilot P-L, gates G-L1 and G-L2. The conditional package WP-L3 (merge agent) runs only when the noise rule fails mainly through duplicates. The text names no other app, company, host, project, case ID, or PR number. The recall plan of 2026-11-17 lies outside the repository. Its lens names are reused here, and the lens text in this file is new.
 
 The SG-A natural-issue analysis (docs/eval/results.md, section "SG-A natural-issue analysis") shows that the finder loses the missed natural issues, and it proposes the next recall screen.
 
@@ -258,6 +258,7 @@ Pilot total: about $32-53 (estimate). A failed pilot stops the gate. Fix the mec
 - When G-L0 fails, runs3 does not run (question 4). Ask the user before G-L2. Then compare lenses3 with the SG-A union(3) number, as information only.
 - Result (2026-11-23): G-L0 failed on SG-A. Δu is 3 seeds (9.1 points): unionRecall(1) 90.9%, unionRecall(3) 100%. That is not more than S_R of 4 seeds (12.1 points). So runs3 does not run.
 - SG-A also shows that the seeded set has no recall headroom: 90.9% mean recall leaves at most 3 seeds of gain, less than S_R (seeded-truth.md section 9 SG-A result). So G-L2 cannot pass "better" on this set either. The lenses3 seeded run is held. Pending the user's decision of 2026-11-23, lenses3 waits for a new prompt 2.9 baseline on the natural local set.
+- Result (2026-11-25, docs/eval/results.md): lenses3 ran on a fixed 10-case natural subset against baseline r6. Grounded recall rose from 35.7% to 42.9% (not significant). Grounded noise rose from 1.25 to 2.70, and judge fp from 0.30 to 0.50, so the noise rule fails. Cost is 4.8x. lenses3 does not ship and stays opt-in.
 
 ### 5.4 Candidate runs
 

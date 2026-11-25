@@ -188,4 +188,63 @@ Code a84610d, 2 natural cases, repeat 1, three arms. Total cost $16.12.
 - lenses3: 3 passes ran. Cost about 7x a baseline run on the same case ($5.13 against $0.74). 3 of 9 must-finds shown.
 - callers: cost about the same as a baseline run. 2 of 9 must-finds shown. The callers arm uses a prompt near the baseline.
 - Two cases cannot show a quality difference.
-- Decision (user, 2026-11-24): CodeGraph stays opt-in and does not become a default, because some users do not need it. No full eval run of "codegraph" is planned. The full runs of callers and lenses3 are open with the user.
+- Decision (user, 2026-11-24): CodeGraph stays opt-in and does not become a default, because some users do not need it. No full eval run of "codegraph" is planned. The full runs of callers and lenses3 ran on 2026-11-25 (next section).
+
+### 2026-11-25: baseline r6, callers, and lenses3 on the natural set
+
+Code a84610d, prompt 2.9, local natural set r6: 41 cases, 60 shown must-finds. Effort medium.
+
+Baseline r6, repeat 2, 82 case runs (81 complete, 1 incomplete, 0 failed):
+
+| Metric | Value |
+|---|---|
+| Cost | $215.34 total; $2.63 and 5.3 min per case run |
+| Shown recall | 35.8% (23/60 and 20/60, spread 3) |
+| Grounded recall | 38.3% (23 and 23, by judge labels) |
+| Candidate recall | 39.2% |
+| Union shown recall, k=2 | 48.3% |
+| Recall by size | large 29.5%, small 39.5% |
+| Precision | 25.7% |
+| Line noise, grounded noise | 1.56 and 1.55 per case |
+| Judge fp per case run | 0.16 |
+| Severity ok | 100% |
+| Cost spread between repeats | 35% per case on average |
+| Judge labels | $6.01; must-finds labelled tp 58/82, agreement 70.7% |
+
+- The set has no traps, so judge fp on traps cannot be measured.
+
+Variant "callers" (D2), full set, repeat 2, 82 case runs (82 complete, 0 failed):
+
+| Metric | Baseline | callers |
+|---|---|---|
+| Cost per case run | $2.63 | $3.25 (+24%), about $267 total |
+| Minutes per case run | 5.3 | 6.0 |
+| Grounded recall | 38.3% | 35.0% (23 and 19 of 60) |
+| Grounded recall, small cases | 42.1% | 34.2% |
+| Grounded recall, large cases | 31.8% | 36.4% |
+| Grounded noise per case | 1.55 | 1.68 (limit +0.155: pass) |
+| Judge fp per case run | 0.159 | 0.232 (limit +0.070: FAIL) |
+| Severity ok | 100% | 91.9% |
+
+- Paired delta of grounded recall: −3.3 points, 90% interval −10.4 to +4.0 (not significant). Labels $5.03.
+- Verdict: "callers" does not ship and stays opt-in. It fails the noise rule on judge fp and costs 24% more.
+
+Variant "lenses3", a fixed 10-case subset chosen before the run, repeat 1, 10 runs (0 failed, 0 incomplete). The control is the same 10 cases of baseline r6 (20 runs):
+
+| Metric | Baseline | lenses3 |
+|---|---|---|
+| Cost per case run | $1.59 | $7.55 (4.8x), about $75.5 total |
+| Minutes per case run | 4.2 | 15.0 |
+| Grounded recall | 35.7% | 42.9% |
+| Candidate recall | 39.3% | 53.6% |
+| Precision | 40.9% | 34.2% |
+| Grounded noise per case | 1.25 | 2.70 (limit +0.125: FAIL) |
+| Judge fp per case run | 0.30 | 0.50 (limit +0.07: FAIL) |
+| Severity ok | 100% | 100% |
+
+- Paired delta of grounded recall: +7.1 points, 90% interval −4.9 to +26.3 (not significant; 8 PR groups, 28 must-finds).
+- Most extra noise is findings that the judge labels true (+1.25 per case), not false (+0.20 per case).
+- Labels $2.03; must-finds labelled tp 22/29, agreement 75.9%.
+- Verdict: lenses3 does not ship and stays opt-in. It costs about 5x and doubles the noise, and the recall gain is not significant.
+- Guess, not measured: many extra findings are judged true, so the must-find list can miss real issues.
+- eval:ab has no command to compare a subset run with the full baseline. A scratch script trimmed the baseline to the subset cases and loaded the baseline labels under the full-set key.
