@@ -582,6 +582,10 @@ describe("verify phase in a review run", () => {
       >;
       expect(Object.keys(agents)).toEqual(["rl-main", "rl-verifier"]);
       expect(agents["rl-verifier"]).toMatchObject({ effort: "high", model: "haiku" });
+      // review-quality-2026.md item 6b: the verifier model reaches only the verify call.
+      const find = h.calls().find((x) => !h.schemaOf(x).includes("verdicts")) as Call;
+      expect(find.argv.includes("--model") ? flag(find.argv, "--model") : null).not.toBe("haiku");
+      expect(JSON.stringify(find)).not.toContain('"haiku"');
       expect(agents["rl-verifier"]?.prompt).toContain(
         `## From the target branch: src/server/CLAUDE.md (applies to src/server/**)\n\n${RULE}`,
       );

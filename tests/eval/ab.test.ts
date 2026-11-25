@@ -173,6 +173,7 @@ const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   reviewerMode: null,
   verifier: null,
   verifierEffort: null,
+  verifierModel: null,
   replay: false,
   baselineOnly: false,
   reviewOnly: false,
@@ -280,6 +281,9 @@ describe("eval:ab --baseline checks", () => {
     const cut = ["--clean", "8", "--repeat", "2", "--candidate-variants", "broad", "--candidate-effort", "low", "--review-only"];
     const saved = runFlags(parsed(cut));
     expect(flagsRefusal(saved, parsed(cut))).toBeNull();
+    // A flags file made before --candidate-verifier-model still resumes.
+    const { "--candidate-verifier-model": _, ...older } = saved;
+    expect(flagsRefusal(older, parsed(cut))).toBeNull();
     // A changed or dropped flag of the cut run, and a flag that it did not have.
     const changes: [string[], string][] = [
       [cut.map((x) => (x === "broad" ? "verify2" : x)), "--candidate-variants broad, but this run has --candidate-variants verify2."],
@@ -289,6 +293,10 @@ describe("eval:ab --baseline checks", () => {
         "--candidate-reviewer-effort none, but this run has --candidate-reviewer-effort high.",
       ],
       [[...cut, "--candidate-reviewer-mode", "off"], "--candidate-reviewer-mode none, but this run has --candidate-reviewer-mode off."],
+      [
+        [...cut, "--candidate-verifier-model", "haiku"],
+        "--candidate-verifier-model none, but this run has --candidate-verifier-model haiku.",
+      ],
       [cut.map((x) => (x === "2" ? "3" : x)), "--repeat 2, but this run has --repeat 3."],
       [[...cut, "--candidate-repeat", "1"], "--candidate-repeat none, but this run has --candidate-repeat 1."],
       [cut.filter((x) => x !== "--review-only"), "--review-only on, but this run has --review-only off."],
@@ -471,6 +479,7 @@ describe("eval:ab arguments", () => {
       effort: null,
       reviewerMode: null,
       verifierEffort: null,
+      verifierModel: null,
       replay: false,
       baselineOnly: false,
       reviewOnly: false,
@@ -590,7 +599,7 @@ describe("eval:ab arguments", () => {
   test("the reviewer mode, verify effort, and candidate repeat reach only the candidate runner arguments", () => {
     const o = parseAb([
       ...["--repeat", "3", "--candidate-repeat", "2", "--candidate-reviewer-mode", "off"],
-      ...["--candidate-verifier-effort", "high"],
+      ...["--candidate-verifier-effort", "high", "--candidate-verifier-model", "sonnet"],
     ]);
     if ("error" in o) throw new Error(o.error);
     const at = (a: string[], flag: string) => (a.includes(flag) ? a[a.indexOf(flag) + 1] : undefined);
@@ -604,11 +613,15 @@ describe("eval:ab arguments", () => {
         undefined,
       ]);
       expect([at(cand, "--repeat"), at(cand, "--reviewer-mode"), at(cand, "--verifier-effort")]).toEqual(["2", "off", "high"]);
+      expect([at(base, "--verifier-model"), at(cand, "--verifier-model")]).toEqual([undefined, "sonnet"]);
       expect(at(cand, "--replay-find")).toBe("r.json");
     }
     expect(parseAb(["--candidate-reviewer-mode", "bogus"])).toMatchObject({ error: expect.stringContaining("--reviewer-mode must be") });
     expect(parseAb(["--candidate-verifier-effort", "bogus"])).toMatchObject({
       error: expect.stringContaining("--verifier-effort must be"),
+    });
+    expect(parseAb(["--candidate-verifier-model", "bad name"])).toMatchObject({
+      error: expect.stringContaining("--verifier-model must be"),
     });
   });
 
@@ -631,6 +644,8 @@ describe("eval:ab arguments", () => {
         error: expect.stringContaining("--candidate-replay replays the finder of the baseline, but the candidate changes"),
       });
     expect(parseAb(["--candidate-replay", "--candidate-verifier-effort", "high"])).toMatchObject({ replay: true, verifierEffort: "high" });
+    // review-quality-2026.md item 6b: the verify model reaches only the verify call.
+    expect(parseAb(["--candidate-replay", "--candidate-verifier-model", "haiku"])).toMatchObject({ replay: true, verifierModel: "haiku" });
     // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can test it.
     expect(parseAb(["--candidate-replay", "--candidate-variants", "verify2"])).toMatchObject({ replay: true, variants: ["verify2"] });
     // review-quality-2026.md item 10: security2-verify is the verify half of security2.

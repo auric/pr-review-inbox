@@ -174,6 +174,19 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(parseOptions(["--verifier-effort", "bogus"])).toMatchObject({ error: expect.stringContaining("--verifier-effort must be") });
   });
 
+  test("--verifier-model sets only the verify model of the run profile and refuses a bad name (review-quality-2026.md item 6b)", () => {
+    const o = parseOptions(["--verifier-model", "sonnet", "--verifier-effort", "high"]);
+    if ("error" in o) throw new Error(o.error);
+    expect(o.verifierModel).toBe("sonnet");
+    const p = evalProfile(o);
+    if ("error" in p) throw new Error(p.error);
+    expect(p.profile.verifier).toEqual({ ...DEFAULT_VERIFIER, ...SHIPPED_PROFILES[0]?.verifier, model: "sonnet", effort: "high" });
+    expect(p.profile.model).toBe(SHIPPED_PROFILES[0]?.model ?? null);
+    expect((parseOptions([]) as Options).verifierModel).toBeNull();
+    for (const bad of ["bad name", ""])
+      expect(parseOptions(["--verifier-model", bad])).toMatchObject({ error: expect.stringContaining("--verifier-model must be") });
+  });
+
   test("finderChange names the finder fields, and leaves out the verifier effort and model", () => {
     const p = evalProfile(parseOptions([]) as Options);
     if ("error" in p) throw new Error(p.error);
@@ -997,12 +1010,31 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(a.runs.map((x) => x.finderRisks)).toEqual([open, open]);
 
       // A live finder of this scenario finds nothing, so the found item comes from the recording.
-      const replay = await run("replay", [], ["--cases", ids, "--replay-find", rec.file, "--verifier-effort", "high"]);
+      const replay = await run(
+        "replay",
+        [],
+        ["--cases", ids, "--replay-find", rec.file, "--verifier-effort", "high", "--verifier-model", "sonnet"],
+      );
       expect(replay.stderr).toBe("");
       expect(replay.code).toBe(0);
       expect(replay.stdout).toContain(`Replay: the finder and salvage calls come from ${basename(rec.file)}.`);
       const b = readResult(replay.file);
-      expect(b.requested).toMatchObject({ replayOf: basename(rec.file), verifierEffort: "high", reviewerMode: "auto" });
+      expect(b.requested).toMatchObject({
+        replayOf: basename(rec.file),
+        verifierEffort: "high",
+        verifierModel: "sonnet",
+        reviewerMode: "auto",
+      });
+      expect(replay.stdout).toContain(", verifier model sonnet, ");
+      // review-quality-2026.md item 6b: the picked model reaches each verify call. The recording ran the main model.
+      const models = (name: string) =>
+        readRecords<{ argv: string[] }>(join(dir, `${name}-calls.jsonl`))
+          .filter((x) => x.argv.includes("-p"))
+          .map((x) => (x.argv.includes("--model") ? x.argv[x.argv.indexOf("--model") + 1] : null));
+      expect(models("replay")).toEqual(["sonnet", "sonnet"]);
+      expect(models("record")).not.toContain("sonnet");
+      expect(compareText(a, b)).toContain(", verifier effort high, verifier model sonnet, finder replayed from ");
+      expect(compareText(a, a)).not.toContain("verifier model");
       expect(found(b)).toEqual(found(a));
       expect(calls("replay")).toEqual([
         ["verify", "high"],
@@ -1062,6 +1094,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       };
       expect(refusal([])).toBeNull();
       expect(refusal(["--verifier-effort", "max"])).toBeNull();
+      expect(refusal(["--verifier-model", "haiku"])).toBeNull();
       expect(refusal(["--rereview"])).toContain("the recording ran the other mode");
       // A PR note changes the finder prompt.
       expect(refusal(["--notes"])).toContain("the recording ran without --notes");

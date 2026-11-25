@@ -76,7 +76,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Item 1: one agent on large PRs | review-quality-2026.md item 1 | dropped | Failed (C1a) | review-quality-2026.md item 1 | None. |
 | Item 8: variant "quotes" | review-quality-2026.md item 8 | dropped | 0% effect | review-quality-2026.md item 8 | None. |
 | Question source fixes | the audit of 2026-11-19 | dropped for now | Not started | None | 97% of question items came from runs before prompt 2.7. Count again later. |
-| Item 6b: verifier model | review-quality-2026.md item 6b | recommended | Not started | None | No eval flag. The profile has verifier.model. |
+| Item 6b: verifier model | review-quality-2026.md item 6b | recommended | Built opt-in | None | The profile has verifier.model and the editor has "Check model". Eval flags: `--verifier-model`, `--candidate-verifier-model`. Not measured. |
 | Delegation fixes 1, 3, and 4: variant "handoff" | delegation-gaps.md section 3 | recommended | Not started | None | None. |
 | Count of delegated runs that read task.md | delegation-gaps.md section 4 | recommended | Not started | None | Needs the user's OK. |
 | git history rule and a git_blame gate | the audit of 2026-11-19 | recommended | Not started | None | None. |

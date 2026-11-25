@@ -344,6 +344,16 @@ describe("profile editor model", () => {
     });
   });
 
+  test("review-quality-2026.md item 6b: the check model saves and round-trips; empty means the main run model", () => {
+    const d = toDrafts([p("general", "General", { model: "opus" })]);
+    expect(d[0]?.verifier.model).toBe("");
+    expect(toProfiles(d)[0]?.verifier.model).toBeNull();
+    const picked = change(d, { act: "edit", i: 0, patch: { verifier: { ...(d[0] as Draft).verifier, model: " sonnet " } } });
+    const saved = toProfiles(picked)[0];
+    expect(saved).toMatchObject({ model: "opus", verifier: { mode: "on", model: "sonnet" } });
+    expect(toDrafts(profileList.parse([saved]))[0]?.verifier.model).toBe("sonnet");
+  });
+
   test("the limits match the shared request schema", () => {
     expect(LIMITS.profiles).toBe(MAX_PROFILES);
     expect(LIMITS.prompt).toBe(MAX_NOTE);

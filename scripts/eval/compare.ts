@@ -167,6 +167,12 @@ const reviewerEffortOf = (r: EvalResult) => {
 const verifierOf = (r: EvalResult) =>
   r.requested?.verifier ?? (r.profile.verifier as { mode?: string } | undefined)?.mode ?? "not recorded";
 
+// review-quality-2026.md item 6b: the verify model of the stored profile. Shown only when set, so the header of the main model stays.
+const verifierModelOf = (r: EvalResult) => {
+  const m = (r.profile.verifier as { model?: string | null } | undefined)?.model;
+  return m ? `, verifier model ${m}` : "";
+};
+
 const header = (r: EvalResult) => {
   // A file made before "requested" existed does not record the flags. The models and efforts that ran still show.
   const q = r.requested ?? { model: "not recorded", effort: "not recorded" };
@@ -177,7 +183,7 @@ const header = (r: EvalResult) => {
   const e2 = r.requested;
   const replay = `${e2?.replayOf ? `, finder replayed from ${e2.replayOf}` : ""}${e2?.notes ? ", PR notes on" : ""}`;
   const resumed = (r.resumes ?? []).map((x) => `${x.commit}${x.dirty ? " (uncommitted changes)" : ""} (CLI ${x.cliVersion})`);
-  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${replay}, ${r.runner} CLI, ${runs}`;
+  return `commit ${r.commit}${r.dirty ? " (uncommitted changes)" : ""}${resumed.length ? `, resumed at commit ${resumed.join(", ")}` : ""}, ${set}${rescored}, prompt version ${r.promptVersion}, profile ${r.profile.id}${r.profileVersion === undefined ? "" : ` of profile version ${r.profileVersion}`} (revision ${r.profile.revision.slice(0, 8)}), volume ${r.volume ?? "none"}, CLI ${r.cliVersion}, model ${q.model} (ran ${list(usedModels(r))}), effort ${q.effort} (ran ${list(usedEfforts(r))}), reviewer effort ${reviewerEffortOf(r)}, reviewer mode ${e2?.reviewerMode ?? "not recorded"}, verifier ${verifierOf(r)}, verifier effort ${e2?.verifierEffort ?? "not recorded"}${verifierModelOf(r)}${replay}, ${r.runner} CLI, ${runs}`;
 };
 
 // "pass 1", "only pass 1", "pass 2", and so on.

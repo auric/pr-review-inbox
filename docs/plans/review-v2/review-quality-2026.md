@@ -249,6 +249,7 @@ In keep, name the point of the group with the most concrete trigger and the most
 
 ### 6b. Verifier model (opus against sonnet)
 
+- Status: built opt-in 2026-11-25, not measured. The profile field `verifier.model` and the editor control "Check model" existed. They pick the model of the verify call and of rl-verifier, and the finder keeps the main model. The eval flags `--verifier-model` (eval) and `--candidate-verifier-model` (eval:ab) are new. The result header records `requested.verifierModel` only when a model is set, so older results still resume. The default stays "Same as the main run".
 - Hypothesis: a stronger verifier loses fewer true findings. [A] Anthropic's /code-review validates bug findings with Opus and rule findings with Sonnet. Our verifier runs on the profile model at medium.
 - Experiment: `--candidate-replay --clean 8` with the verifier model set to each value, on the recorded baseline, next to the replays of improvement 4. Ship rule: as improvement 4. A winner ships as the profile's verifier model.
 

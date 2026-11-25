@@ -173,11 +173,13 @@ export type EvalResult = {
   // verifier: the verify mode that ran, after --verifier. verifierEffort and reviewerMode: the values that ran, after
   // --verifier-effort and --reviewer-mode. Absent in files made before the flags existed. replayOf: the file name of the
   // --replay-find result. Absent: the finder ran. notes: --notes gave each local case its PR note (cases.ts NOTE_FILE). Absent: no note.
+  // verifierModel: the verify model after --verifier-model. Absent: the main model.
   requested?: {
     model: string;
     effort: string;
     verifier?: string;
     verifierEffort?: string;
+    verifierModel?: string;
     reviewerMode?: string;
     replayOf?: string;
     notes?: true;

@@ -114,7 +114,7 @@ const PROMPT_VERSION = REVIEW_PROMPT_VERSION;
 
 export const USAGE = `Usage: bun run eval -- [--replies] [--real] [--set ${SET_NAMES.join("|")}] [--cases all|id,id] [--rereview] [--profile general] [--profile-version ${PROFILES_VERSION}] [--modules security,api]
   [--volume balanced] [--model opus] [--effort ${EFFORTS.join("|")}] [--reviewer-effort ${EFFORTS.join("|")}] [--reviewer-mode ${REVIEWER_MODES.join("|")}] [--verifier ${VERIFIER_MODES.join("|")}] [--verifier-effort ${EFFORTS.join("|")}]
-  [--variants ${VARIANTS.join(",")}] [--notes] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
+  [--verifier-model sonnet] [--variants ${VARIANTS.join(",")}] [--notes] [--repeat 2] [--out <folder>] [--keep] [--ordinals] [--replay-find <result.json>] [--resume <result.json>] [--runner <command> <args...>]
 --real runs the claude CLI on PATH. --runner runs the given CLI instead and must come last. Without both, the plan prints and the exit code is 2.
 --rereview runs the re-review cases of the set: each case seeds its earlier run, then runs a re-review as the app does.
 --notes gives each local case the PR note of its source run, as the app did. Without it, each run has an empty note.
@@ -143,6 +143,8 @@ export type Options = {
   verifier: VerifierSetup["mode"] | null;
   // null: no flag, so the verify effort of the profile applies.
   verifierEffort: Effort | null;
+  // null: no flag, so the verify model of the profile applies (review-quality-2026.md item 6b).
+  verifierModel: string | null;
   // The result file whose recorded finder and salvage calls this run replays. null: the finder runs.
   replayFind: string | null;
   // The cut result file that this run continues and writes. null: a new result file in out.
@@ -183,6 +185,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
         "reviewer-mode": { type: "string" },
         verifier: { type: "string" },
         "verifier-effort": { type: "string" },
+        "verifier-model": { type: "string" },
         "replay-find": { type: "string" },
         resume: { type: "string" },
         variants: { type: "string" },
@@ -228,6 +231,9 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const verifierEffort = v["verifier-effort"] ?? null;
   if (verifierEffort !== null && !(EFFORTS as readonly string[]).includes(verifierEffort))
     return { error: `--verifier-effort must be one of ${EFFORTS.join(", ")}.` };
+  const verifierModel = v["verifier-model"] === undefined ? null : modelName.safeParse(v["verifier-model"]);
+  if (verifierModel && !verifierModel.success)
+    return { error: "--verifier-model must be a model alias such as sonnet, or a full model ID such as claude-opus-5-5." };
   // An empty value runs no check section.
   const modules = v.modules === undefined ? null : v.modules.trim() ? v.modules.split(",").map((s) => s.trim()) : [];
   if (modules?.some((x) => !(MODULE_IDS as readonly string[]).includes(x)))
@@ -254,6 +260,7 @@ export function parseOptions(argv: string[]): Options | { error: string } {
     reviewerMode: reviewerMode as ReviewerMode | null,
     verifier: verifier as VerifierSetup["mode"] | null,
     verifierEffort: verifierEffort as Effort | null,
+    verifierModel: verifierModel?.data ?? null,
     replayFind: v["replay-find"] === undefined ? null : resolve(v["replay-find"]),
     resume: v.resume === undefined ? null : resolve(v.resume),
     variants: variants as Variant[] | null,
@@ -267,21 +274,25 @@ export function parseOptions(argv: string[]): Options | { error: string } {
 }
 
 // The profile of the run with the --modules, --volume, --model, --effort, --reviewer-effort, --reviewer-mode, --verifier,
-// --verifier-effort, and --variants values. A field that this app version does not know is an error, so a result file never names a
+// --verifier-effort, --verifier-model, and --variants values. A field that this app version does not know is an error, so a result file never names a
 // setup that did not run.
 export function evalProfile(o: Options) {
   const shipped = SHIPPED_PROFILES.some((p) => p.id === o.profile) && shippedProfileAt(o.profile, o.profileVersion ?? PROFILES_VERSION);
   if (!shipped) return { error: `Unknown profile ${o.profile}. Shipped profiles: ${SHIPPED_PROFILES.map((p) => p.id).join(", ")}.` };
   // One spread per object, so one flag never drops the value of another.
   const reviewer = { ...(o.reviewerEffort && { effort: o.reviewerEffort }), ...(o.reviewerMode && { mode: o.reviewerMode }) };
-  const verifier = { ...(o.verifier && { mode: o.verifier }), ...(o.verifierEffort && { effort: o.verifierEffort }) };
+  const verifier = {
+    ...(o.verifier && { mode: o.verifier }),
+    ...(o.verifierEffort && { effort: o.verifierEffort }),
+    ...(o.verifierModel && { model: o.verifierModel }),
+  };
   const extra = {
     ...(o.modules && { modules: o.modules }),
     ...(o.volume && { volume: o.volume }),
     ...(o.model && { model: o.model }),
     ...(o.effort && { effort: o.effort }),
     ...((o.reviewerEffort || o.reviewerMode) && { reviewer: { ...shipped.reviewer, ...reviewer } }),
-    ...((o.verifier || o.verifierEffort) && { verifier: { ...shipped.verifier, ...verifier } }),
+    ...((o.verifier || o.verifierEffort || o.verifierModel) && { verifier: { ...shipped.verifier, ...verifier } }),
     ...(o.variants && { variants: o.variants }),
   };
   const list = profileList.safeParse(SHIPPED_PROFILES.map((p) => (p.id === o.profile ? { ...shipped, ...extra } : p)));
@@ -1062,6 +1073,8 @@ export async function main(argv: string[]): Promise<number> {
       effort: profile.effort ?? "default",
       verifier: profile.verifier.mode,
       verifierEffort: verifierEffort(profile),
+      // Only a set model, so a result made before this field still resumes. Absent: the verify call runs the main model.
+      ...(profile.verifier.model && { verifierModel: profile.verifier.model }),
       reviewerMode: profile.reviewer.mode,
       ...(o.replayFind && { replayOf: basename(o.replayFind) }),
       ...(o.notes && { notes: true as const }),
@@ -1153,7 +1166,7 @@ export async function main(argv: string[]): Promise<number> {
       replay,
     };
     console.log(
-      `Eval: set ${o.set}${o.rereview ? " (re-reviews)" : ""}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, reviewer mode ${requested.reviewerMode}, verifier ${requested.verifier}, verifier effort ${requested.verifierEffort}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
+      `Eval: set ${o.set}${o.rereview ? " (re-reviews)" : ""}, ${count(cases.length, "case")} x ${o.repeat}, ${profileText(o)}, model ${requested.model}, effort ${requested.effort}, reviewer mode ${requested.reviewerMode}, verifier ${requested.verifier}, verifier effort ${requested.verifierEffort}${requested.verifierModel ? `, verifier model ${requested.verifierModel}` : ""}, prompt version ${result.promptVersion}, CLI ${checked.version}.`,
     );
     if (requested.replayOf)
       console.log(`Replay: the finder and salvage calls come from ${requested.replayOf}. The verify calls run the CLI.`);

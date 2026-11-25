@@ -23,7 +23,7 @@ import { type EvalResult, endedOnLimit, finished, keptRun, LIMIT_EXIT, score } f
 
 const REPO = resolve(import.meta.dir, "../..");
 export const USAGE = `Usage: bun run eval:ab -- [--repeat N] [--candidate-repeat N] [--candidate-variants a,b] [--candidate-modules a,b] [--effort ${EFFORTS.join("|")}] [--candidate-effort ${EFFORTS.join("|")}]
-  [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}]
+  [--candidate-reviewer-effort ${EFFORTS.join("|")}] [--candidate-reviewer-mode ${REVIEWER_MODES.join("|")}] [--candidate-verifier ${VERIFIER_MODES.join("|")}] [--candidate-verifier-effort ${EFFORTS.join("|")}] [--candidate-verifier-model sonnet]
   [--candidate-replay] [--baseline-only] [--review-only] [--large] [--seeded] [--clean N] [--db <db-*.sqlite>] [--cache <git folder>] [--out <folder>] [--user <slug>] [--results <folder>] [--baseline <folder>] [--resume] [--runner <command> <args...>]
 --results: the folder of the result files. Default: a new folder in eval-results/.
 --resume: continue the cut run in --results (run.ts --resume). Each <mode>-<side> folder with one result continues it, and an empty folder runs. It needs --results. Give the flags of the cut run: a different flag is refused. A baseline-only run can take a lower --repeat when the finished runs fit.
@@ -34,7 +34,7 @@ Exit code 3: a run hit the usage limit. Run the same command with --resume after
 --effort: the effort of the baseline and candidate runs. Default: the effort of the shipped profile.
 --candidate-effort: the effort of the candidate runs. Default: the effort of the baseline.
 --candidate-reviewer-effort and --candidate-reviewer-mode: the rl-reviewer effort and mode of the candidate runs. Default: those of the shipped profile.
---candidate-verifier and --candidate-verifier-effort: the verify mode and effort of the candidate runs. Default: those of the shipped profile.
+--candidate-verifier, --candidate-verifier-effort, and --candidate-verifier-model: the verify mode, effort, and model of the candidate runs. Default: those of the shipped profile.
 --candidate-replay: the candidate replays the recorded finder calls of the baseline and runs only the verify calls. It refuses a candidate flag that changes the finder.
 --baseline-only: run only the baseline. --review-only: skip the re-review cases.
 --large: run only the review cases that give the baseline the rl-reviewer agent. The re-review cases do not run.
@@ -64,6 +64,8 @@ export type AbOptions = {
   verifier: string | null;
   // null: the candidate keeps the verify effort of the shipped profile. run.ts --verifier-effort checks the value.
   verifierEffort: string | null;
+  // null: the candidate keeps the verify model of the shipped profile. run.ts --verifier-model checks the value.
+  verifierModel: string | null;
   // The candidate replays the recorded finder and salvage calls of the baseline (run.ts --replay-find).
   replay: boolean;
   baselineOnly: boolean;
@@ -104,6 +106,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
         "candidate-reviewer-mode": { type: "string" },
         "candidate-verifier": { type: "string" },
         "candidate-verifier-effort": { type: "string" },
+        "candidate-verifier-model": { type: "string" },
         "candidate-replay": { type: "boolean", default: false },
         "baseline-only": { type: "boolean", default: false },
         "review-only": { type: "boolean", default: false },
@@ -138,6 +141,7 @@ export function parseAb(argv: string[]): AbOptions | { error: string } {
     reviewerMode: str("candidate-reviewer-mode") ?? null,
     verifier: str("candidate-verifier") ?? null,
     verifierEffort: str("candidate-verifier-effort") ?? null,
+    verifierModel: str("candidate-verifier-model") ?? null,
     replay: v["candidate-replay"] === true,
     baselineOnly: v["baseline-only"] === true,
     reviewOnly: v["review-only"] === true,
@@ -195,6 +199,7 @@ export function runFlags(o: AbOptions): Record<string, string | boolean | null> 
     "--candidate-reviewer-mode": o.reviewerMode,
     "--candidate-verifier": o.verifier,
     "--candidate-verifier-effort": o.verifierEffort,
+    "--candidate-verifier-model": o.verifierModel,
     "--candidate-replay": o.replay,
     "--baseline-only": o.baselineOnly,
     "--review-only": o.reviewOnly,
@@ -253,6 +258,7 @@ export function runArgs(
   if (cand && o.reviewerMode !== null) args.push("--reviewer-mode", o.reviewerMode);
   if (cand && o.verifier !== null) args.push("--verifier", o.verifier);
   if (cand && o.verifierEffort !== null) args.push("--verifier-effort", o.verifierEffort);
+  if (cand && o.verifierModel !== null) args.push("--verifier-model", o.verifierModel);
   if (cand && replay) args.push("--replay-find", replay);
   if (resume) args.push("--resume", resume);
   args.push("--ordinals");
