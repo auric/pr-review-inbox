@@ -206,6 +206,7 @@ The do-not-flag list of each language:
 - Experiment: `--candidate-replay --clean 8` on 2 recorded baseline repeats: a control replay (the verifier's own spread), "verify2", one effort level, plus the probe set.
 - Ship rule: false findings kept in main drop by more than the control spread, and true findings lost rise by no more than the control spread.
 - Status: verify2 failed in W2 (2026-11-16). False findings kept in main went from 14 to 17. It stays opt-in.
+- Replay tool (2026-11-26): `--replay-find` and `--candidate-replay` cover this item. Gate VR-A reused them for "refute-issue" (verifier-rule.md section 6). No effort-level replay is recorded.
 
 ### 5. Fold refuted protected findings
 

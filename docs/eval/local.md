@@ -90,7 +90,7 @@ A clean case measures noise on a PR with no known defect (SWR-Bench clean PRs). 
 
 `fixtures/eval/probe/` holds 33 small synthetic cases in git. `bun run eval -- --set probe` runs them. Each case is a known trap for a reviewer:
 
-- 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong.
+- 2 cases have a PR thread next to a seeded bug. In the thread, the PR author claims that "this case is handled". The claim is wrong. The bug is a must-find at each volume (review-ideas.md idea 2).
 - 1 case has a thread with a correct claim on code that looks wrong. The code is a trap.
 - 2 cases have task text with acceptance criteria. The change does not meet one criterion. That bug has module `intent`.
 - 1 case has task text, and unchanged code meets the criterion. The line that seems to miss it is a trap.

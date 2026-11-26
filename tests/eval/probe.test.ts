@@ -8,8 +8,9 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildRepo, type EvalCase, loadCases, SETS } from "../../scripts/eval/cases";
-import { type EvalItem, type EvalResult, matches } from "../../scripts/eval/score";
+import { type EvalItem, type EvalResult, matches, mustFind } from "../../scripts/eval/score";
 import { git } from "../../src/server/review/git";
+import { VOLUMES } from "../../src/shared/dto";
 import { readRecords } from "../support/fake-claude";
 import { claudeStream } from "../support/review-fixture";
 
@@ -85,6 +86,8 @@ describe("probe set", () => {
     for (const c of by["polish point"] ?? []) expect(c.bugs.map((b) => b.severityMin)).toEqual(["nit"]);
     // Each security case has one bug of module security, so the class security slice counts it.
     for (const c of by.security ?? []) expect(c.bugs.map((b) => b.module)).toEqual(["security"]);
+    // review-ideas.md idea 2: the bug under a wrong thread claim is a must-find at each volume, so recall counts it.
+    for (const c of by["wrong claim"] ?? []) for (const v of VOLUMES) expect(mustFind(c, v).map((b) => b.id)).toEqual(["B1"]);
     // A trap only, and a clean case has no bug. Each PR text is non-empty, so the intent module runs (catalog.ts lacks).
     for (const k of ["right claim", "met criterion", "no requirement", "clean", "met obligation"] as const)
       for (const c of by[k] ?? []) expect(c.bugs).toEqual([]);
