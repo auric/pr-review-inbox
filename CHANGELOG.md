@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."
+- Inbox: the "1 updated · re-sort" chip no longer stays for a pull request that you opened from a link outside the view. Before, a click on the chip did not clear it.
 - Review profiles: the new switch "Thorough review" runs a full review twice at once and merges the findings. A point that both runs raise shows once. It uses about twice the Claude usage.
 - Review profiles: the new switch "Stacked PRs" gives a review run the parent and child PRs of a stacked PR. The new switch "Submodule changes" gives a review run the commits of each moved submodule. Both are off by default.
 - Review: Ctrl+Enter on the "Include <file> in runs" switch of an attachment now starts the review and keeps the file included. Before, it also turned the attachment off, so the run got no attachment.

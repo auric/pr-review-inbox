@@ -1230,7 +1230,7 @@ function derive(p) {
     : p.role === "REVIEWER" && p.my === "UNAPPROVED" && !p.reviewedAt ? "review"
     : p.newCommits.length && p.reviewedAt ? "commits"
     : p.unread ? "comments"
-    : p.threads.some((t) => t.turn === "wait") ? "waiting"
+    : p.threads.some((t) => t.turn === "wait") || p.role === "AUTHOR" ? "waiting"
     : "quiet";
 }
 
@@ -1508,7 +1508,9 @@ function why(p) {
       return quote(c.last);
     case "waiting": {
       const t = p.threads.find((x) => x.turn === "wait");
-      return `${turnMark(t)}<span class="quote">You replied last, ${ago(t.ago)} ago.</span>`;
+      if (t) return `${turnMark(t)}<span class="quote">You replied last, ${ago(t.ago)} ago.</span>`;
+      // My open PR that nobody has answered.
+      return `<span class="quote">${p.reviewers?.length && p.reviewers.every(([, s]) => s === "APPROVED") ? "Approved." : "Waiting for review."}</span>`;
     }
     case "closed":
       return `<span class="quote"><b>${p.state === "MERGED" ? "Merged." : "Declined."}</b> ${c ? `${esc(first(c.last.who))} replied to you after that.` : ""}</span>`;

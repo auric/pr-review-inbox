@@ -185,7 +185,8 @@ function groupOf(r: RawRow, t: Turns): Group {
   if (reviewer && r.my_status === "UNAPPROVED" && !r.last_reviewed_commit) return "review";
   if (reviewer && r.last_reviewed_commit && r.last_reviewed_commit !== r.source_head) return "commits";
   if (r.unread) return "comments";
-  return t.waitSince !== null ? "waiting" : "quiet";
+  // User decision 2026-11-26: my open PR is not done while it waits for review.
+  return t.waitSince !== null || (r.state === "OPEN" && r.my_role === "AUTHOR") ? "waiting" : "quiet";
 }
 
 type RawCheckpoint = { last_complete_at: number | null; incomplete_reason: string | null; last_error: string | null };

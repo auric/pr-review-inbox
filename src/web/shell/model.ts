@@ -161,7 +161,16 @@ export function why(p: PrRow, now: number): Why {
       return { ...out, text: quote ?? "New messages." };
     case "waiting": {
       const when = p.waitSince === null ? null : ago(p.waitSince, now);
-      const text = when === null ? "You replied last." : when === "now" ? "You replied last, just now." : `You replied last, ${when} ago.`;
+      // An own open PR waits without a "wait" thread (groupOf in src/server/inbox/queries.ts).
+      const review = p.reviewers.length > 0 && p.reviewers.every((r) => r.status === "APPROVED") ? "Approved." : "Waiting for review.";
+      const text =
+        when === null
+          ? p.role === "AUTHOR"
+            ? review
+            : "You replied last."
+          : when === "now"
+            ? "You replied last, just now."
+            : `You replied last, ${when} ago.`;
       return { ...out, turn: { kind: "wait", text: "Waiting on others" }, text };
     }
     case "closed":

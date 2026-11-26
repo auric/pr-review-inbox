@@ -259,6 +259,9 @@ test("a reload or a deep link shows the same place; an unknown view and a gone P
   await expect(h1(page)).toHaveText(C);
   await expect(row(page, C)).toHaveAttribute("aria-current", "true");
   await expect(page.locator("[data-row]")).toHaveCount(1);
+  // The re-sort keeps this row too, so no chip offers it.
+  await expect(page.locator("[data-row]").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /updated · re-sort/ })).toHaveCount(0);
 
   // An unknown view gives Needs you.
   await openApp(page, "/inbox/x");

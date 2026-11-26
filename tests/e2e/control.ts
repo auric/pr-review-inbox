@@ -144,6 +144,8 @@ export type Scenario = {
   author: boolean;
   // PR 1004: the token owner adds the general thread 5000003. Its newest message is mine, so it waits for the reviewer.
   own: boolean;
+  // PR 1004: no thread at all. Nobody has answered the PR yet.
+  silent: boolean;
   // PR 1001: the source branch moves one commit on, with a C++ header and source and a Python file.
   native: boolean;
   // PR 1004 (session consult): the reviewer adds the outdated inline thread 5000004 on src/cache/flush.ts and the resolved thread 5000005.

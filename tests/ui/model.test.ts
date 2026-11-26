@@ -137,6 +137,15 @@ describe("why-lines", () => {
     expect(why(row({ group: "waiting" }), NOW).text).toBe("You replied last.");
   });
 
+  test("my open PR without a wait thread names its review state", () => {
+    const r = (status: string) => ({ slug: "rev", name: "Rev", login: "rev", status });
+    const mine = (o: Partial<PrRow>) => why(row({ group: "waiting", role: "AUTHOR", ...o }), NOW);
+    expect(mine({ reviewers: [] })).toMatchObject({ turn: { kind: "wait" }, text: "Waiting for review." });
+    expect(mine({ reviewers: [r("APPROVED"), r("UNAPPROVED")] }).text).toBe("Waiting for review.");
+    expect(mine({ reviewers: [r("APPROVED"), r("APPROVED")] }).text).toBe("Approved.");
+    expect(mine({ reviewers: [r("APPROVED")], waitSince: NOW }).text).toBe("You replied last, just now.");
+  });
+
   test("D1: a closed PR names its state first, also in Needs you", () => {
     expect(why(row({ group: "closed", state: "MERGED" }), NOW)).toEqual({ closed: "Merged.", turn: null, lead: null, text: null });
     expect(why(row({ group: "closed", state: "DECLINED" }), NOW).closed).toBe("Declined.");
@@ -253,6 +262,9 @@ describe("frozen list order", () => {
     expect(movedCount(groupRows([rows[0], rows[1], row({ id: 3, group: "review" })] as PrRow[]), g)).toBe(1);
     // A kept row that the server list no longer holds.
     expect(movedCount(groupRows([...rows, row({ id: 4, group: "quiet" })]), g)).toBe(1);
+    // A PR from the URL that the re-sort keeps too (App.tsx).
+    const routed = row({ id: 4, group: "quiet" });
+    expect(movedCount(groupRows([...rows, routed]), groupRows([...rows, routed]))).toBe(0);
     expect(movedCount([], [])).toBe(0);
   });
 });

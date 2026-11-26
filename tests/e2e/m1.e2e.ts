@@ -653,3 +653,13 @@ test("a read row keeps its place, so the next unread row is not shown and read; 
   await expect(row(page, firstTitle)).toHaveAttribute("aria-current", "true");
   expect((await prRow(request, secondTitle)).unread).toBe(1);
 });
+
+test("my PR without an answer waits for review in My PRs, not in Done", async ({ page }) => {
+  await connect(page, false);
+  await control("state", { author: true, silent: true });
+  await nav(page, "My PRs").click();
+  const mine = row(page, "Release the write lock after each entry");
+  await expect(mine).toContainText("Waiting for review.");
+  const group = await mine.evaluate((el) => el.closest("section, details")?.querySelector("h3")?.textContent ?? "");
+  expect(group).toMatch(/^Waiting on others/);
+});

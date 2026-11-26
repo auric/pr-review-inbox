@@ -496,6 +496,19 @@ describe("GET /api/prs and /api/prs/:id", () => {
     expect(list.every((r) => r.yourTurn === 0 && r.cause === null && r.seenAt === null && r.tasks.length === 0)).toBe(true);
   });
 
+  test("my open PR without a wait thread waits, a quiet review PR stays quiet, and my merged PR is closed", async () => {
+    const h = await setup();
+    const mine = h.pr({ my_role: "AUTHOR", my_status: null, author_slug: ME });
+    const resolved = h.pr({ my_role: "AUTHOR", my_status: null, author_slug: ME });
+    h.comment(resolved, 1, { ack_version: 0, thread_resolved: 1 });
+    const review = h.pr({ my_status: "APPROVED", last_reviewed_commit: "head1" });
+    const merged = h.pr({ my_role: "AUTHOR", my_status: null, author_slug: ME, state: "MERGED" });
+    const list = await h.rows();
+    const group = (id: number) => list.find((r) => r.id === id)?.group;
+    expect([group(mine), group(resolved), group(review), group(merged)]).toEqual(["waiting", "waiting", "quiet", "closed"]);
+    expect(list.find((r) => r.id === mine)).toMatchObject({ waitSince: null, yourTurn: 0, unread: 0 });
+  });
+
   test("the cause is the newest unread your-turn thread and opens at its first unread message", async () => {
     const h = await setup();
     const p = h.pr({ my_role: "AUTHOR", my_status: null, author_slug: ME });

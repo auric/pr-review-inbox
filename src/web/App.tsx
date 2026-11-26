@@ -298,7 +298,8 @@ function Shell({ stale }: { stale: boolean }) {
   const rows = slots.flatMap((x) => byId.get(x.id) ?? []);
   const slotGroup = new Map(slots.map((x) => [x.id, x.group]));
   const groups = layout(rows, (p) => slotGroup.get(p.id) ?? p.group);
-  const updated = movedCount(groups, layout(live));
+  // Compare with the list that the re-sort chip gives. A PR from the URL stays kept after the re-sort, so it is not an update.
+  const updated = movedCount(groups, layout(kept && (want === routed || want === pinRow?.id) ? [...live, kept] : live));
   const ids = navIds(groups, doneOpen);
   // The first open row is the default. A row of the folded Done group stays selected only after a click.
   // A pending or missing pin selects nothing, so no other PR shows and turns read.

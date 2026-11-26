@@ -239,6 +239,7 @@ const INITIAL: Scenario = {
   task: false,
   author: false,
   own: false,
+  silent: false,
   native: false,
   consult: false,
   resolved: false,
@@ -441,6 +442,7 @@ const D_OWN = "Note to self: say in the README that the flush takes the lock onc
 const D_INLINE = "Name the lock after the data that it guards.";
 const D_RESOLVED = "Add a test for an empty cache.";
 function activitiesD(): S.Activity[] {
+  if (sc.silent) return [];
   const list: [number, string, unknown, Record<string, unknown>?][] = D_THREADS.map(([id, text]) => [id, text, alex]);
   if (sc.own) list.push([5000003, D_OWN, me]);
   if (sc.consult) {
