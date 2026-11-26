@@ -267,3 +267,24 @@ The two repeats of baseline r6 act as two runs on the same PR. The analysis used
 - Findings that both runs raise match a must-find 2.5 times as often (37.8% against 14.8%). The judge labels both groups true at about the same rate (93% and 91%), so a one-run-only finding is not less trustworthy.
 - Limits: 48.3% is an upper bound, because it assumes a perfect merge. Both runs use the same prompt, so the gain comes from run-to-run variance, not from a better method. A union also lifts any variant.
 - Per dollar, this beats lenses3 (+7.1 points for 4.8x) and callers (−3.3 points for 1.24x).
+
+### 2026-11-26: pilot of git-history on the natural set
+
+Variant "git-history" (prompt 2.9+git-history, code d3cda25), the fixed 10-case natural subset of the lenses3 run, repeat 1, effort medium, 10 runs (all completed). A Claude usage limit cut the run after 2 runs, and --resume finished it. The control is the same 10 cases of baseline r6 (20 runs):
+
+| Metric | Baseline | git-history |
+|---|---|---|
+| Cost per case run | $1.59 | $2.42 (1.52x), $24.20 total |
+| Minutes per case run | 4.2 | 4.7 (1.12x) |
+| Grounded recall | 35.7% (10/28) | 25.0% (7/28) |
+| Candidate recall | 39.3% | 28.6% |
+| Precision | 40.9% | 23.5% |
+| Grounded noise per case | 1.25 | 1.00 (pass) |
+| Judge fp per case run | 0.30 | 0.30 (pass) |
+| Severity ok | 100% | 100% |
+
+- Paired delta of grounded recall: −10.7 points, 90% interval −28.1 to +6.7 (not significant; 8 PR groups, 28 must-finds).
+- GH-0 part b: PASS. The find phase made 4 ok git_blame calls (lead 2, subagent 2) in 3 of 10 case runs, against 0 in the baseline runs. Ok git_log calls: 16 against 2. Ok git_show calls: 2 against 0.
+- 4 of 25 findings cite an earlier commit: 3 confirmed, 1 refuted.
+- Verdict: FAIL per git-history.md section 5, because grounded recall is below the subset baseline. git-history stays opt-in, and no full run follows.
+- Guess, not measured: the history reads take turns from the bug search.

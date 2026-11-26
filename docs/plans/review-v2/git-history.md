@@ -1,6 +1,6 @@
 # Git history rule and the git_blame gate
 
-Status: design of 2026-11-26 against main ca795d1. WP-GH1 is built on c63912b as an opt-in variant. GH-0 part b and P-GH are open. Ledger row: "git history rule and a git_blame gate" (review-ledger.md:82). Main session decisions of 2026-11-26: Q1 own variant; Q3 no WP-GH2 (a one-off count of the `.calls/` records answers GH-0 part b).
+Status: design of 2026-11-26 against main ca795d1. Built opt-in (WP-GH1, c63912b). Pilot P-GH failed on 2026-11-26, so no full run follows. GH-0 part b passed. Ledger row: "git history rule and a git_blame gate" (review-ledger.md:82). Main session decisions of 2026-11-26: Q1 own variant; Q3 no WP-GH2 (a one-off count of the `.calls/` records answers GH-0 part b).
 
 ## 1. Source and verdict
 
@@ -64,6 +64,8 @@ The stored eval call records (`*.calls/*.json`) keep the run events. A count ove
 - Part a: the tool works in a real run from a lead and a subagent. The records of section 2 meet it. Record that in integration-check.md. Cost: none.
 - Part b: the finder calls git_blame under the variant. This is the first check of pilot P-GH. Pass: at least one find record has an ok git_blame call. Report the share of case runs with a call, by lead and by subagent.
 - Read part b from the `.calls/` records of the pilot with a one-off count: the events with tool `mcp__rl-git__git_blame`, status ok, and kind find.
+- Result of 2026-11-26 (pilot P-GH, code d3cda25): part b PASS. The find phase made 4 ok git_blame calls (lead 2, subagent 2) in 3 of 10 case runs. The 20 baseline runs of the same cases made 0.
+- Other ok find calls, pilot against baseline: git_log 16 against 2, git_show 2 against 0.
 
 ## 5. Eval and ship
 
@@ -73,6 +75,13 @@ The stored eval call records (`*.calls/*.json`) keep the run events. A count ove
 - Full run (user approves, paid, only after P-GH): the natural set, repeat 2, against baseline r6. The ship rule is "Better" (review-quality-2026.md:144). Estimate: about $215 to $270, plus about $5 for labels.
 - --candidate-replay refuses the variant, because the variant changes the finder prompt version (run.ts:320, 327-347).
 - Cost risk: a large refactor removes many lines, and the finder blames each range. If P-GH costs too much, narrow line 3 to the lines that a finding is about.
+- P-GH result (2026-11-26, code d3cda25, prompt 2.9+git-history, effort medium): all 10 runs completed. A Claude usage limit cut the run after 2 runs, and --resume finished it.
+- Cost $24.20 total, $2.42 per case run against $1.59 (1.52x). Minutes 4.7 against 4.2 (1.12x).
+- Grounded recall fell from 35.7% (10/28) to 25.0% (7/28). The paired delta is −10.7 points, 90% interval −28.1 to +6.7 (not significant).
+- The noise rule passes: grounded noise per case 1.25 to 1.00, judge fp per case run 0.30 to 0.30. Severity ok stays 100%.
+- 4 of 25 findings cite an earlier commit: 3 confirmed, 1 refuted.
+- Verdict: FAIL, because grounded recall is below the subset baseline. No full run. The variant stays opt-in.
+- Guess, not measured: the history reads take turns from the bug search.
 
 ## 6. Work package
 
