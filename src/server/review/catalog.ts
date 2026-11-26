@@ -829,10 +829,30 @@ export const passLenses = (p: Partial<Pick<Profile, "variants">>): (Lens | null)
 // docs/plans/review-v2/thorough-review.md D6: two arms of a full review with one pass. lenses3 and runs3 win. The caller checks the run
 // kind: a re-review, Explain, and every other run kind keep one run.
 export const twice = (p: Partial<Pick<Profile, "variants">>) => has(p, "twice") && passLenses(p).length === 1;
+// docs/plans/review-v2/git-history.md section 3.3: the lines of the variant "git-history". rl-main and rl-reviewer get them after
+// ARCHITECTURE_LINES. Line 1 stays under "handoff": it states the purpose of the tools, and gitToolLines states their names and aliases.
+export const gitHistory = (p: Partial<Pick<Profile, "variants">>) => has(p, "git-history");
+export const HISTORY_LINES = [
+  "The rl-git tools git_log, git_blame, and git_show show when the code changed and why.",
+  "Call git_log with since BASE once. Compare the commit subjects of the change with what its code does.",
+  "When the change removes or rewrites lines that exist at BASE, call git_blame with rev BASE on those lines.",
+  "Use the path at BASE. The git_diff hunk headers give the start line and the line count at BASE.",
+  "For each commit that git_blame names, read its subject with git_log, with rev set to that commit and max_count 1.",
+  "Call git_show on that commit only when its subject names a fix, a revert, or a reason for those lines.",
+  "When the change brings back a problem that the earlier commit fixed, report it.",
+  "In evidence, also give the hash and the subject of that commit.",
+  "Before you set preexisting to true, read the file at BASE with git_show, with rev BASE and the path.",
+];
+
 // The finder variant lines after the finder rules. A line keeps its first copy, so a stacked variant adds no line twice. With lens null,
-// the lines and their order are those of "callers" and "architecture".
+// the lines and their order are those of "callers", "architecture", and "git-history".
 const focus = (p: Profile, lens: Lens | null) => [
-  ...new Set([...callers(p), ...(architecture(p) ? ARCHITECTURE_LINES : []), ...(lens ? LENS_LINES[lens] : [])]),
+  ...new Set([
+    ...callers(p),
+    ...(architecture(p) ? ARCHITECTURE_LINES : []),
+    ...(gitHistory(p) ? HISTORY_LINES : []),
+    ...(lens ? LENS_LINES[lens] : []),
+  ]),
 ];
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.

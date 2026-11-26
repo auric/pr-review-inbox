@@ -282,6 +282,21 @@ describe("git MCP server", () => {
     for (const r of [c.c5, `${c.c5}~0`, "side", "refs/rl/1/reviewed"]) await refused("git_show", { rev: r }, rereviewClient);
   });
 
+  test("AC-GH5: the git-history chain names the older commit of a rewritten line and its subject", async () => {
+    // Re-review: BASE is c7, and the rewritten line "two" comes from c1, an older commit.
+    const hunk = /^@@ -(\d+),(\d+)/m.exec(await ok("git_diff", { path: "a.txt" }, rereviewClient));
+    expect(hunk?.slice(1)).toEqual(["1", "3"]);
+    const blame = await ok("git_blame", { path: "a.txt", rev: "BASE", start_line: 1, max_lines: 3 }, rereviewClient);
+    const two = blame.split("\n").find((l) => l.endsWith(") two")) ?? blame;
+    // git blame marks a boundary commit with "^" and drops the last hash digit. git_log still resolves the 39 digits.
+    const hash = /^\^?([0-9a-f]{39,40}) /.exec(two)?.[1] ?? "";
+    expect(hash.length).toBeGreaterThanOrEqual(39);
+    expect(c.c1.startsWith(hash)).toBe(true);
+    const log = await ok("git_log", { rev: hash, max_count: 1 }, rereviewClient);
+    expect(log).toContain(c.c1);
+    expect(log).toContain("first commit");
+  });
+
   test("stacked-prs.md section 5.4: PARENT_BASE exists only with the pin; without it the tool list keeps its bytes", async () => {
     const ws = { cache, sourceHead: c.c4, rangeBase: c.c1, targetHead: c.c2 };
     // A parent whose target branch is at c1: PARENT_BASE is merge-base(c1, TARGET).

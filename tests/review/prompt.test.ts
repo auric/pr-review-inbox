@@ -1185,6 +1185,7 @@ describe("review v3 prompt switches", () => {
       "callers",
       "classes",
       "codegraph",
+      "git-history",
       "handoff",
       "lenses3",
       "minor-fold",
@@ -1225,6 +1226,7 @@ describe("review v3 prompt switches", () => {
       withVariants("runs3"),
       withVariants("codegraph"),
       withVariants("handoff"),
+      withVariants("git-history"),
     ].map(profileRevision);
     expect(new Set(revisions).size).toBe(revisions.length);
     // spec.md section 1.8: outcome hide parses to no key and keeps the revision. Demote changes it.
