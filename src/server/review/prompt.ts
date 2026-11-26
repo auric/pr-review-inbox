@@ -3,7 +3,7 @@
 
 // The stdin prompt of a run (plan v3 WP10, replies.md WP17, r2 S-ASK, r3 S-FIX). Only the project instructions and the note or the ask question are instructions. It never quotes PR, comment, or tracker text.
 import type { PrTask } from "../../shared/dto";
-import { LARGE_FILE_RULE, type Profile } from "./catalog";
+import { gitToolLines, LARGE_FILE_RULE, type Profile } from "./catalog";
 
 export type PromptInput = {
   mergeBase: string;
@@ -105,8 +105,7 @@ function common(i: PromptInput, rereview?: { earlier: number[] }, question?: str
           "- ./context/discussion.md holds the earlier turns of this talk as data.",
         ]
       : []),
-    `- The rl-git tools git_log, git_blame, git_show, and git_diff read the history. HEAD is the head commit, BASE the ${rereview ? "base of the reviewed range" : "merge base"}, and TARGET the target branch head.`,
-    "- Call git_diff with stat_only to list the changed files of BASE..HEAD. Call git_diff with a path to see the changes of one file.",
+    ...gitToolLines(!!rereview).map((l) => `- ${l}`),
     ...(rereview ? [`- The merge base is ${i.mergeBase}. Call git_diff from it for the line numbers of removed lines.`] : []),
     "",
     ...(conversation ? [...conversation, ""] : []),

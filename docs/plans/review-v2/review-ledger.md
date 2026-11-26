@@ -77,7 +77,7 @@ Decision values: "user decided" means that the source records a user answer. "re
 | Item 8: variant "quotes" | review-quality-2026.md item 8 | dropped | 0% effect | review-quality-2026.md item 8 | None. |
 | Question source fixes | the audit of 2026-11-19 | dropped for now | Not started | None | 97% of question items came from runs before prompt 2.7. Count again later. |
 | Item 6b: verifier model | review-quality-2026.md item 6b | recommended | Built opt-in | None | The profile has verifier.model and the editor has "Check model". Eval flags: `--verifier-model`, `--candidate-verifier-model`. Not measured. |
-| Delegation fixes 1, 3, and 4: variant "handoff" | delegation-gaps.md section 3 | recommended | Not started | None | None. |
+| Delegation fixes 1, 3, and 4: variant "handoff" | delegation-gaps.md section 3 | recommended | Built opt-in | None | Not measured. Measure with eval:ab on the large cases only (delegation-gaps.md section 4). Open points in section 3. |
 | Count of delegated runs that read task.md | delegation-gaps.md section 4 | recommended | Not started | None | Needs the user's OK. |
 | git history rule and a git_blame gate | the audit of 2026-11-19 | recommended | Not started | None | None. |
 | Verifier rule replay | review-quality-2026.md item 4 | recommended | Built; no new tool needed (2026-11-26) | 690338e: `eval -- --replay-find`, `eval:ab -- --candidate-replay`, `--candidate-verifier-effort`; tests/eval/ab.test.ts | The replay reruns only the verify calls on the recorded finder output. `eval:compare` prints the verdict table and the loss rows. The verify2 replay ran in W2 (failed). Gate VR-A ran the refute-issue replay (verifier-rule.md section 6). No effort-level replay is recorded. |

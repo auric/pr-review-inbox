@@ -89,6 +89,7 @@ import {
   explorerAgent,
   fixAgent,
   GIT_SERVER,
+  handoff,
   type Lens,
   type ListTools,
   type McpUse,
@@ -1339,6 +1340,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
             withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), a.used, finder || explain),
             delegate,
             parts.length,
+            handoff(profile),
           ),
           maxTurns: d
             ? Math.min(profile.maxTurns, DISCUSS_MAX_TURNS)
@@ -1353,7 +1355,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
             ? {
                 [REVIEWER]: withInstructions(
                   withInstructions(
-                    withMcp(withSkills(withLanguages(reviewer, langs, !broad(profile)), folders, always), a.used, finder),
+                    withMcp(
+                      withSkills(withLanguages(reviewer, langs, !broad(profile)), folders, always),
+                      a.used,
+                      finder && (handoff(profile) ? "files" : true),
+                    ),
                     instructions.text,
                   ),
                   noteSection(brief.note),
@@ -2266,6 +2272,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         main: withDelegation(
           withMcp(withSkills(withLanguages(mainAgent(profile, context), langs, !broad(profile)), folders, always, true), tools.used, true),
           delegate,
+          0,
+          handoff(profile),
         ),
         maxTurns: profile.maxTurns,
         model: profile.model,

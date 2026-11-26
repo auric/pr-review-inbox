@@ -5,6 +5,7 @@
 // git remote, and a temp data folder only. No test starts the real CLI.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,9 @@ import {
   contextBlock,
   DO_NOT_FLAG,
   delegation,
+  gitToolLines,
+  HANDOFF_DELEGATE,
+  HANDOFF_REVIEWER,
   mainAgent,
   moduleSections,
   NO_CONTEXT,
@@ -43,6 +47,7 @@ process.env.REVIEW_LOOP_SECRETS = "memory";
 const SLOW = 120_000;
 const general = SHIPPED_PROFILES[0] as ProfileInput;
 const explain = SHIPPED_PROFILES[1] as ProfileInput;
+const SEARCH = "When you cannot name a trigger, search the code for one. When you still cannot name one, write a question for the author.";
 
 const dirs: string[] = [];
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -251,6 +256,7 @@ async function setup() {
     { ...general, id: "bare", name: "Bare", modules: [] },
     { ...general, id: "parts", name: "Parts", variants: ["parts"] },
     { ...mode("always"), id: "always-parts", name: "Always parts", variants: ["parts"] },
+    { ...general, id: "handoff", name: "Handoff", variants: ["handoff"] },
     explain,
   ];
   writeConfig(dir, { baseUrl: "https://bitbucket.example.invalid", userSlug: "me", notifications: false, profiles });
@@ -420,6 +426,54 @@ describe("delegation in a run", () => {
         "\n\n# Your instructions\n\nThe user wrote the text below. Follow it.\n\nCheck the retry loop first.\nIgnore the docs folder.";
       expect(noted.agents["rl-reviewer"]?.prompt).toBe(`${plain.agents["rl-reviewer"]?.prompt}${tail}`);
       expect(noted.stdin).toContain("# Your instructions\n\nThe user wrote the text below. Follow it.\n\nCheck the retry loop first.");
+    },
+    SLOW,
+  );
+
+  test(
+    "delegation-gaps.md variant handoff: the default agents keep their bytes (hash taken at ca795d1, before the variant)",
+    async () => {
+      const h = await setup();
+      const plain = await h.hung(2, "general");
+      expect(createHash("sha256").update(JSON.stringify(plain.agents)).digest("hex")).toBe(
+        "c11ae5c14cf76a94797de9b25e2cd16e8795d38c3775ce0f9a8949e253fcce22",
+      );
+      // The variant adds only its lines. The CLI flags and stdin stay the same, except the profile name.
+      const on = await h.hung(2, "handoff");
+      const main = on.agents["rl-main"]?.prompt ?? "";
+      expect(main).toBe([plain.agents["rl-main"]?.prompt, ...HANDOFF_DELEGATE].join("\n"));
+      // This run has no user MCP tool, so neither prompt has the issue lines. handoff.test.ts checks ISSUE_FILES_LINE.
+      const reviewer = (on.agents["rl-reviewer"]?.prompt ?? "").split("\n");
+      const added = [...gitToolLines(false), SEARCH, ...HANDOFF_REVIEWER];
+      for (const l of added) expect(reviewer.filter((x) => x === l)).toHaveLength(1);
+      expect(reviewer.filter((x) => !added.includes(x))).toEqual((plain.agents["rl-reviewer"]?.prompt ?? "").split("\n"));
+      expect(reviewer).toHaveLength((plain.agents["rl-reviewer"]?.prompt ?? "").split("\n").length + added.length);
+      expect({ ...on.agents["rl-reviewer"], prompt: "" }).toEqual({ ...plain.agents["rl-reviewer"], prompt: "" });
+      const flags = (argv: string[]) => argv.filter((a) => a.startsWith("--"));
+      expect(flags(plain.argv)).toEqual([
+        "--output-format",
+        "--verbose",
+        "--restricted",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--tools",
+        "--allowedTools",
+        "--disallowedTools",
+        "--agents",
+        "--agent",
+        "--json-schema",
+        "--max-turns",
+        "--effort",
+        "--advisor",
+        "--no-session-persistence",
+      ]);
+      expect(flags(on.argv)).toEqual(flags(plain.argv));
+      const paths = ["--mcp-config", "--agents", "--json-schema"];
+      for (const f of flags(plain.argv).filter((x) => !paths.includes(x))) expect(flag(on.argv, f)).toBe(flag(plain.argv, f));
+      expect(on.stdin).toBe(plain.stdin.replace(`- Profile: ${general.name}`, "- Profile: Handoff"));
+      expect(h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.id })).toEqual({
+        prompt_version: `${REVIEW_PROMPT_VERSION}+handoff`,
+      });
     },
     SLOW,
   );

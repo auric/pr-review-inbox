@@ -704,7 +704,7 @@ export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): 
     ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
-    ...(main
+    ...(main || handoff(p)
       ? ["When you cannot name a trigger, search the code for one. When you still cannot name one, write a question for the author."]
       : []),
     "In title, name the problem in one line of 12 words or fewer. In body, give the consequence and a fix direction in 3 sentences or fewer.",
@@ -1030,10 +1030,37 @@ export const PART_REVIEWER =
 // Agent tool gets this line.
 export const AGENT_PARAMS_RULE = "Never pass model or effort on an Agent call. Each agent has its own model and effort.";
 
+// docs/plans/review-v2/delegation-gaps.md section 3 fixes 1, 3, and 4: the variant "handoff". rl-reviewer gets the trigger search
+// (finderRules), the rl-git lines after the context block, and HANDOFF_REVIEWER at the end. rl-main gets HANDOFF_DELEGATE after the
+// delegation lines. The default prompts keep their bytes.
+export const handoff = (p: Partial<Pick<Profile, "variants">>) => has(p, "handoff");
+export const HANDOFF_REVIEWER = [
+  "Report a point without a trigger as a question, with what you checked.",
+  "Also report risks: each risk that you noted and did not check, in one line.",
+];
+export const HANDOFF_DELEGATE = [
+  "Copy the questions and risks of each call into questions and risks.",
+  "Check each acceptance criterion against the merged findings of all calls.",
+];
+// The rl-git lines of the "# Tools" section (prompt.ts common). rereview: BASE is the base of the reviewed range.
+export const gitToolLines = (rereview: boolean) => [
+  `The rl-git tools git_log, git_blame, git_show, and git_diff read the history. HEAD is the head commit, BASE the ${rereview ? "base of the reviewed range" : "merge base"}, and TARGET the target branch head.`,
+  "Call git_diff with stat_only to list the changed files of BASE..HEAD. Call git_diff with a path to see the changes of one file.",
+];
+
 // spec.md section 1.5: the delegation lines come after the language, skill, and MCP lines. parts: the number of part files, 0 for none.
-export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null, parts = 0): AgentSpec =>
+// more: the profile has the variant "handoff".
+export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null, parts = 0, more = false): AgentSpec =>
   mode
-    ? { ...a, prompt: [a.prompt, AGENT_PARAMS_RULE, ...(mode === "auto" && parts > 0 ? partLines(parts) : DELEGATE[mode])].join("\n") }
+    ? {
+        ...a,
+        prompt: [
+          a.prompt,
+          AGENT_PARAMS_RULE,
+          ...(mode === "auto" && parts > 0 ? partLines(parts) : DELEGATE[mode]),
+          ...(more ? HANDOFF_DELEGATE : []),
+        ].join("\n"),
+      }
     : a;
 
 // docs/plans/review-v2/spec.md section 3.4: the Explain agent lines after the lens. judge.ts judgeExplain checks the links, the risk
@@ -1556,10 +1583,12 @@ export const ISSUE_LINES = [
   "Use these tools only to read. Never create, edit, move, or comment through them.",
   "A task key of this change may go into a query to such a tool.",
 ];
+// The variant "handoff" (delegation-gaps.md fix 4): rl-reviewer has no Metadata section, so its line 1 names the files only.
+export const ISSUE_FILES_LINE = "The files ./context/pr-context.md and ./context/task.md name the tasks.";
 export const ISSUE_REMOTE_RULE = "The one exception is a task key of this change in a query to an issue tool.";
 
-// issues: the run is a review, an explain run, a verify phase, or a salvage run (ISSUE_LINES).
-export function mcpLines(used: McpUse[], issues = false): string[] {
+// issues: the run is a review, an explain run, a verify phase, or a salvage run (ISSUE_LINES). "files": rl-reviewer under "handoff".
+export function mcpLines(used: McpUse[], issues: boolean | "files" = false): string[] {
   const mine = used.filter((u) => !u.app);
   const app = used.filter((u) => u.app).flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`));
   const remote = mine.filter((u) => u.remote).map((u) => u.server);
@@ -1570,7 +1599,7 @@ export function mcpLines(used: McpUse[], issues = false): string[] {
     ...(remote.length
       ? [`These MCP servers are remote: ${remote.join(", ")}. ${REMOTE_RULE}${issues ? ` ${ISSUE_REMOTE_RULE}` : ""}`]
       : []),
-    ...(mine.length && issues ? ISSUE_LINES : []),
+    ...(mine.length && issues ? ISSUE_LINES.map((l, i) => (issues === "files" && i === 1 ? ISSUE_FILES_LINE : l)) : []),
     ...(app.length ? [codegraphLine(app)] : []),
   ];
 }
@@ -1580,7 +1609,7 @@ export const codegraphLine = (tools: string[]) =>
   `The app indexed ./repo for these CodeGraph tools: ${tools.join(", ")}. Use them to find the callers and dependents of each changed symbol.`;
 
 // Adds the user MCP tools to the prompt of an agent.
-export const withMcp = (a: AgentSpec, used: McpUse[], issues = false): AgentSpec =>
+export const withMcp = (a: AgentSpec, used: McpUse[], issues: boolean | "files" = false): AgentSpec =>
   used.length ? { ...a, prompt: [a.prompt, ...mcpLines(used, issues)].join("\n") } : a;
 
 // model and effort are agent definition fields (code.claude.com/docs/en/sub-agents). Gate B13 (2.1.301): the CLI accepts both, and
@@ -1597,6 +1626,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       p.prompt,
       ...classes(p),
       ...contextBlock(c),
+      ...(handoff(p) ? gitToolLines(c.rereview) : []),
       ...finderRules(p, false, c),
       ...focus(p, lens),
       ...finderList(p),
@@ -1609,6 +1639,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       PREEXISTING_REVIEWER,
       ...(minorFold(p) ? [POLISH_REVIEWER] : []),
       ...(parts ? [PART_REVIEWER] : []),
+      ...(handoff(p) ? HANDOFF_REVIEWER : []),
     ].join("\n"),
   };
 }
