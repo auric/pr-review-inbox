@@ -28,6 +28,7 @@ import {
   prLists,
   type Reply,
   repoWrites,
+  reviewWrites,
   startFakeBitbucket,
 } from "../support/fake-bitbucket";
 import { readRecords } from "../support/fake-claude";
@@ -506,6 +507,12 @@ r[key("GET", `${A.path}/activities`)] = (req) => (postA.hide ? DROP : paged(post
 r[key("GET", `${B.path}/activities`)] = () => ok(S.onePage(postsB.activities()));
 r[key("GET", `${C.path}/activities`)] = (req) => paged(postsC.activities(), req, "absent");
 r[key("GET", D.path)] = () => ok(D.pr);
+// BRIEF section 9 backlog: the review status writes of the token user on the reviewer PRs. A reset restores the statuses.
+type Reviewed = Parameters<typeof reviewWrites>[2];
+const reviewed = [A, B, C].map(({ pr, path }) => {
+  reviewWrites(fake, path, pr as unknown as Reviewed);
+  return { pr, reviewers: S.clone(pr.reviewers) };
+});
 r[key("GET", `${D.path}/activities`)] = () => ok(S.onePage(postsD.activities()));
 // The commits and changes of PR 77 only exist in the forge scenario. Other PRs get 404, so their detail has no Files or Commits.
 const forgeOnly = (name: string) => (): Reply => (sc.forge ? fixture(name) : NOT_FOUND);
@@ -771,6 +778,7 @@ r[key("POST", "/__control/reset")] = async () => {
   await resetClones();
   await headA();
   for (const p of [postsA, postsB, postsC, postsD]) p.reset();
+  for (const x of reviewed) x.pr.reviewers = S.clone(x.reviewers);
   taskPosts = null;
   // The task PRs and the task branches of the last test go. The other branches and the PR refs stay.
   taskRepo.prs.clear();

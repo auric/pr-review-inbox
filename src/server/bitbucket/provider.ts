@@ -4,6 +4,7 @@
 // ForgeProvider for Bitbucket Server. It returns forge-neutral types from src/shared/types.ts.
 import { z } from "zod";
 import type { BuildCounts, BuildStatus } from "../../shared/build";
+import { isMe } from "../../shared/me";
 import { BRANCH_PAGE, REPO_LIST_MAX, REPO_PAGE } from "../../shared/task";
 import {
   anchorSpan,
@@ -19,7 +20,7 @@ import {
   type User,
 } from "../../shared/types";
 import { type ClientOptions, createClient, ForgeError } from "./client";
-import { NoCloneLink } from "./errors";
+import { NoCloneLink, NotReviewer } from "./errors";
 import {
   activity,
   branch,
@@ -189,6 +190,9 @@ export type CreateResult = { status: "created"; pr: PullRequest; dropped: string
 export type PrUpdate = { version: number; title?: string; description?: string; reviewers?: string[]; toBranch?: string };
 // All zeros: no build reported a status for the commit (spec.md section 6.10).
 export type BuildStats = BuildCounts;
+
+// The review status of a reviewer. UNAPPROVED clears APPROVED and NEEDS_WORK.
+export type ReviewStatus = "APPROVED" | "NEEDS_WORK" | "UNAPPROVED";
 // more: the search has more branches than one page.
 export type BranchPage = { branches: { name: string; isDefault: boolean }[]; more: boolean };
 // config: for git fetch and push only, in the GIT_CONFIG env. It holds the token as an http.<origin>/.extraHeader value.
@@ -484,6 +488,23 @@ export function createBitbucketProvider(opts: ClientOptions) {
     // Not checked on Data Center 9.x. A stale version or a refused reopen throws a ForgeError.
     async reopenPullRequest(ref: PrRef, version: number): Promise<PullRequest> {
       return toPr(await client.post(`${prPath(ref)}/reopen?version=${version}`, {}, pullRequest));
+    },
+
+    // BRIEF section 9 backlog, integration-check.md U112 to U117 (not verified). Approve: POST .../approve. Clear an approval: DELETE
+    // .../approve. Needs work and its clear: PUT .../participants/{slug}. me: the X-AUSERNAME username, which can differ from the slug, so
+    // a fresh read gives the slug, the username, and the current status. Each write goes once. The caller decides the result from the
+    // returned read after the write. A user who is not a reviewer throws NotReviewer before any write.
+    async setReviewStatus(ref: PrRef, me: string, status: ReviewStatus): Promise<PullRequest> {
+      const mine = toPr((await client.get(prPath(ref), pullRequest)).data).reviewers.find((r) => isMe(r, me));
+      if (!mine) throw new NotReviewer(ref.id);
+      const approve = `${prPath(ref)}/approve`;
+      if (status === "APPROVED") await client.post(approve, {}, z.unknown());
+      else if (status === "UNAPPROVED" && mine.status === "APPROVED") await client.del(approve, z.unknown());
+      else {
+        const body = { user: { name: mine.login }, approved: false, status };
+        await client.put(`${prPath(ref)}/participants/${encodeURIComponent(mine.slug)}`, body, z.unknown());
+      }
+      return toPr((await client.get(prPath(ref), pullRequest)).data);
     },
 
     // spec.md section 6.9, Gate G3: the stats read also counts the statuses of the repository-scoped build POST.

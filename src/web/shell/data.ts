@@ -4,8 +4,20 @@
 // Server state through TanStack Query. Keys: ['prs'], ['prs', 'archive'], ['pr', id], ['status'], ['settings'], ['meta'], ['task-preview', ...].
 // An invalidation of ['prs'] also refreshes ['prs', 'archive'].
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { z } from "zod";
 import { toast } from "@/components/ui/toast";
-import type { CheckpointDto, Claimed, FollowState, PrDetail, PrRow, SettingsDto, SettingsInput, SyncStatus } from "../../shared/dto";
+import type {
+  CheckpointDto,
+  Claimed,
+  FollowState,
+  PrDetail,
+  PrRow,
+  ReviewStatusResult,
+  reviewStatusInput,
+  SettingsDto,
+  SettingsInput,
+  SyncStatus,
+} from "../../shared/dto";
 import { api } from "../api";
 import type { AckItem } from "../pr/ack";
 import { ARCHIVED_TEXT, failText, prKey, restoreWords, unfollowText } from "./model";
@@ -96,6 +108,22 @@ export function useFollow() {
     },
     onError: (e, { followed }) => toast.add({ title: followed ? "Follow failed" : "Unfollow failed", description: failText(e, "page") }),
     onSettled: (_, __, { pr }) => refresh(pr.id),
+  });
+}
+
+export type ReviewStatus = z.infer<typeof reviewStatusInput>["status"];
+
+// BRIEF section 9 backlog: Approve, Needs work, and their clear. The server answers after Bitbucket confirms the status.
+export function useReviewStatus() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, status }: { id: number; status: ReviewStatus }) =>
+      read<ReviewStatusResult>(await api.api.prs[":id"]["review-status"].$post({ param: { id: String(id) }, json: { status } })),
+    onError: (e) => toast.add({ title: "Review status failed", description: failText(e) }),
+    onSettled: (_, __, { id }) => {
+      qc.invalidateQueries({ queryKey: ["prs"] });
+      qc.invalidateQueries({ queryKey: ["pr", id] });
+    },
   });
 }
 

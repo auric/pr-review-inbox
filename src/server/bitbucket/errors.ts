@@ -12,6 +12,14 @@ export class NoCloneLink extends Error {
   }
 }
 
+// The token user is not a reviewer of the PR in a fresh read.
+export class NotReviewer extends Error {
+  override name = "NotReviewer";
+  constructor(id: number) {
+    super(`You are not a reviewer of pull request #${id}. Sync the inbox.`);
+  }
+}
+
 export type WriteAction = "create" | "update";
 export type WriteProblem = { sentence: string; button: "Try again" | "Open settings" };
 
@@ -46,4 +54,20 @@ export function writeProblem(e: unknown, action: WriteAction, at: { project: str
   if (e.kind === "rate") return again("Bitbucket is busy. Wait a minute, then try again.");
   if (e.status !== undefined && e.status < 500) return again(`Bitbucket refused the change (HTTP ${e.status}). Check ${pr} in Bitbucket.`);
   return again(`No clear answer from Bitbucket (${e.kind}). Try again.`);
+}
+
+// One sentence for a failed review status change (BRIEF section 9 backlog). The Bitbucket REST docs give 409 for a PR that is not open and
+// for the PR author (integration-check.md U116, not verified).
+export function reviewProblem(e: unknown, at: { project: string; repo: string; id: number }): string {
+  const pr = `pull request #${at.id} in ${at.project}/${at.repo}`;
+  if (e instanceof NotReviewer) return e.message;
+  if (!(e instanceof ForgeError)) return "No clear answer from Bitbucket. Sync the inbox to see your review status.";
+  if (e.kind === "auth") return "Bitbucket rejected the token. Enter a new token in Settings.";
+  if (e.kind === "forbidden") return `Bitbucket does not let the token review ${pr}. Check the token permissions in Bitbucket.`;
+  if (e.kind === "not_found") return `Bitbucket cannot find ${pr}. Sync the inbox, then try again.`;
+  if (e.status === 409) return `Bitbucket refused the review status for ${pr}. The pull request is not open, or you are its author.`;
+  if (e.kind === "rate") return "Bitbucket is busy. Wait a minute, then try again.";
+  if (e.status !== undefined && e.status < 500) return `Bitbucket refused the review status (HTTP ${e.status}). Check ${pr} in Bitbucket.`;
+  // client.ts: a timeout, a network error, a 5xx, or a bad body can follow an accepted write.
+  return `No clear answer from Bitbucket (${e.kind}). Sync the inbox to see your review status.`;
 }

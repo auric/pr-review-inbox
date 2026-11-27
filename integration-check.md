@@ -373,6 +373,21 @@ Run: `bun scripts/gate0/resolve-thread.ts --pr <TEST_PR_URL> --thread <ID>` on a
 | U66. The status for a user that may not change the comment | UNVERIFIED | The 2026-10-20 run had no `--forbidden` thread. The app maps 401 and 403 to "Bitbucket refused to resolve the thread" with a link to the thread. |
 | U67. A reply in a resolved thread is refused (Data Center docs: "you can only react to resolved comment threads but you can't edit or reply") | CONFIRMED (Data Center 9.x, 2026-10-20) | Gate line "reply to resolved: HTTP 400 com.atlassian.bitbucket.validation.ArgumentValidationException taken=false". The status is 400, not 409. The app reads the root comment before each reply post. A resolved thread gets the reopen PUT first (U62). A failed reopen sends no reply. The post confirm says "Reopen thread, post reply". If the post still gets 400 ArgumentValidationException and a new read shows the thread resolved, the post fails with "This thread is resolved. Reopen it first." The fake Bitbucket refuses such a reply with the same 400 body. |
 
+## Review status (not verified)
+
+Status: NOT VERIFIED. The Approve and Needs work buttons of the PR header (BRIEF section 9 backlog) use the Bitbucket Server REST 1.0 calls of the public docs. No real server has answered them yet. The app reads the PR before each write, for the slug and the current status, and reads it again after the write. Only that second read decides the result, so a write without effect shows "Bitbucket did not apply the change", never a false success. Nothing repeats a write. The tests use `reviewWrites` in tests/support/fake-bitbucket.ts, which follows the docs.
+
+Run: set the environment variable `GATE_BITBUCKET_TOKEN` to the token, then `bun scripts/gate/review-status.ts --pr <TEST_PR_URL> --authorize-writes`, on a test PR where the token user is a reviewer. Add `--own-pr <URL>` with a PR of the token user for U116. It WRITES: approve, remove the approval, needs work, clear, then the status from before the run again. The console holds status codes, enum-like strings, booleans, and key names only.
+
+| Fact | Result | Evidence |
+|---|---|---|
+| U112. `POST .../pull-requests/{id}/approve` with an empty JSON body approves, and the next PR GET shows the reviewer with `status` APPROVED | UNVERIFIED | Gate line "approve POST". The app parses no response body. |
+| U113. `DELETE .../pull-requests/{id}/approve` removes the approval, and the next GET shows UNAPPROVED | UNVERIFIED | Gate line "approve DELETE". The client sends DELETE without a body. |
+| U114. `PUT .../pull-requests/{id}/participants/{userSlug}` with `{"user":{"name":<username>},"approved":false,"status":"NEEDS_WORK"}` sets Needs work, and the same body with UNAPPROVED clears it, also over an approval | UNVERIFIED | Gate lines "participants PUT NEEDS_WORK" and "participants PUT UNAPPROVED". |
+| U115. The participants path takes the slug, not the username | UNVERIFIED | The app sends the slug of its reviewer entry and the username in `user.name`. The gate tries the username in the path only when the two differ. |
+| U116. Bitbucket gives 409 for an approve or a participants PUT on a PR that is not open, or by the PR author | UNVERIFIED | Gate line "author approve POST" with `--own-pr`. The app refuses the author and a PR that is not open before any write. A 409 shows "The pull request is not open, or you are its author." 401, 403, and 404 have their own sentences (`reviewProblem` in src/server/bitbucket/errors.ts). |
+| U117. An approve sets `lastReviewedCommit` of the reviewer | UNVERIFIED | Gate field `lastReviewedCommit`. The app does not depend on it. |
+
 ## Review v2 (not run)
 
 Status: B17 to B20 RUN on the real CLI, 2026-10-22: claude 2.1.306, subscription login (`authMethod` claude.ai), reported cost 0.0119 USD, sanitizer hits=0. All gate calls used `--model haiku`. G1 to G6 RUN on the test repository (a personal repository), 2026-10-22. G7 is not run. G9 and G12 passed on 2026-11-24. B20 used the gate's own draft-07 schema copies in scripts/gate/claude-checks.ts. WP-R1 and WP-B0 must ship schemas equal to these copies, or run B20 again.

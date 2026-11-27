@@ -571,6 +571,9 @@ export const readInput = z.object({
 });
 export const followInput = z.object({ followed: z.boolean() });
 export const archiveInput = z.object({ archived: z.boolean() });
+// BRIEF section 9 backlog: the review status of the token user. UNAPPROVED clears it.
+export const reviewStatusInput = z.object({ status: z.enum(["APPROVED", "NEEDS_WORK", "UNAPPROVED"]) });
+export type ReviewStatusResult = { id: number; status: string | null };
 export const followUrlInput = z.object({ url: z.string().trim().min(1).max(2048) });
 
 // ---------- Review (plan v3 WP10) ----------

@@ -70,6 +70,8 @@ const SQL = {
   read: `UPDATE comment SET ack_version = MIN(version, $version)
     WHERE pr = $pr AND comment_id = $id AND (ack_version IS NULL OR ack_version < MIN(version, $version))`,
   follow: "UPDATE pull_request SET followed = $followed, archived_at = IIF($followed = 1, NULL, archived_at) WHERE id = $id",
+  reviewTarget: "SELECT project, repo, pr_id, my_role, state FROM pull_request WHERE id = $id",
+  myStatus: "UPDATE pull_request SET my_status = $status WHERE id = $id",
   archive: "UPDATE pull_request SET archived_at = IIF($archived = 1, COALESCE(archived_at, $now), NULL) WHERE id = $id",
   followState: "SELECT id, followed, archived_at FROM pull_request WHERE id = $id",
   seen: "UPDATE pull_request SET seen_at = $now WHERE id = $id",
@@ -363,6 +365,15 @@ function followState(db: Database, id: number): FollowState | null {
 export function setFollowed(db: Database, id: number, followed: boolean): FollowState | null {
   db.query(SQL.follow).run({ id, followed: followed ? 1 : 0 });
   return followState(db, id);
+}
+
+export type ReviewTarget = { project: string; repo: string; pr_id: number; my_role: string | null; state: string | null };
+
+export const reviewTarget = (db: Database, id: number) => db.query(SQL.reviewTarget).get({ id }) as ReviewTarget | null;
+
+// The status that Bitbucket reported after a review status change. The next sync writes the full reviewer list.
+export function setMyStatus(db: Database, id: number, status: string | null): void {
+  db.query(SQL.myStatus).run({ id, status });
 }
 
 export function setArchived(db: Database, id: number, archived: boolean, now: number): FollowState | null {

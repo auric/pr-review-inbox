@@ -356,6 +356,43 @@ export function repoWrites(
   return { path, prs, builds, writes, repository, branches, merge };
 }
 
+type Participant = { user: { name: string; slug: string }; approved: boolean; status: string };
+const STATUSES = new Set(["APPROVED", "NEEDS_WORK", "UNAPPROVED"]);
+
+// The review status writes of the token user (fake.user) on one PR (BRIEF section 9 backlog), shaped as the Bitbucket REST docs show
+// them. integration-check.md U112 to U117 are not verified. Approve, its DELETE, and the participants PUT answer 200 with the participant.
+// The PUT needs the slug in the path and the username in user.name, else 400. The author, a PR that is not open, or a user who is not a
+// reviewer gets 409. pr is read at request time, so the dashboard and the PR GET that share it show each change. Returns each write.
+export function reviewWrites(fake: FakeBitbucket, path: string, pr: { state: string; author: Participant; reviewers: Participant[] }) {
+  const writes: { method: string; status: string }[] = [];
+  const refused: Reply = { status: 409, body: { errors: [{ message: "You cannot review this pull request." }] } };
+  const mine = () =>
+    pr.state === "OPEN" && pr.author.user.name !== fake.user ? pr.reviewers.find((r) => r.user.name === fake.user) : undefined;
+  const set = (r: Participant, method: string, status: string): Reply => {
+    Object.assign(r, { status, approved: status === "APPROVED" });
+    writes.push({ method, status });
+    return { status: 200, body: { ...r, role: "REVIEWER" } };
+  };
+  fake.routes[key("POST", `${path}/approve`)] = () => {
+    const r = mine();
+    return r ? set(r, "POST", "APPROVED") : refused;
+  };
+  fake.routes[key("DELETE", `${path}/approve`)] = () => {
+    const r = mine();
+    return r ? set(r, "DELETE", "UNAPPROVED") : refused;
+  };
+  fake.routes[key("PUT", `${path}/participants/*`)] = async (req) => {
+    const r = mine();
+    if (!r) return refused;
+    const body = (await req.json()) as { user?: { name?: unknown }; status?: unknown };
+    const slug = decodeURIComponent(new URL(req.url).pathname.split("/").pop() ?? "");
+    if (slug !== r.user.slug || body.user?.name !== r.user.name || typeof body.status !== "string" || !STATUSES.has(body.status))
+      return { status: 400, body: { errors: [{ message: "Bad participant." }] } };
+    return set(r, "PUT", body.status);
+  };
+  return writes;
+}
+
 // The merge of a PR in a bare remote, as Bitbucket writes it (docs/plans/review-v2/spec.md section 6.20.10; Gate G19 confirms the squash
 // shape). squash: one commit with one parent, the target head, and the tree of the 3-way merge of target and source. Else a merge commit
 // with the target and the source heads as parents. edit: more files in the commit, as a merger who edits the squash. The target branch

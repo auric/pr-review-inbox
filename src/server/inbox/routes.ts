@@ -6,9 +6,20 @@ import type { Database } from "bun:sqlite";
 import { Hono } from "hono";
 import { validator } from "hono/validator";
 import type { z } from "zod";
-import { type ApiError, archiveInput, type Claimed, followInput, followUrlInput, readInput } from "../../shared/dto";
+import {
+  type ApiError,
+  archiveInput,
+  type Claimed,
+  followInput,
+  followUrlInput,
+  type ReviewStatusResult,
+  readInput,
+  reviewStatusInput,
+} from "../../shared/dto";
+import { isMe } from "../../shared/me";
 import { parsePrUrl } from "../../shared/pr-url";
 import { ForgeError } from "../bitbucket/client";
+import { reviewProblem } from "../bitbucket/errors";
 import type { Live } from "../live";
 import type { Settings } from "../settings";
 import type { SyncEngine } from "../sync/engine";
@@ -23,8 +34,10 @@ import {
   markRead,
   markSeen,
   prDetail,
+  reviewTarget,
   setArchived,
   setFollowed,
+  setMyStatus,
 } from "./queries";
 
 const json = <T extends z.ZodType>(schema: T) =>
@@ -108,6 +121,46 @@ export function createInboxRoutes(opts: { settings: Settings; sync: SyncEngine; 
       if (!state) return c.json({ error: "Pull request not found." }, 404);
       changed(state.id);
       return c.json(state, 200);
+    })
+    .post("/prs/:id/review-status", idParam, json(reviewStatusInput), async (c) => {
+      // BRIEF section 9 backlog: Approve, Needs work, and their clear. The click is the explicit user action. Only a reviewer of an open
+      // PR gets a write.
+      const s = open();
+      if (!s) return c.json(unconfigured, 409);
+      const { id } = c.req.valid("param");
+      const t = reviewTarget(s.db, id);
+      if (!t?.pr_id) return c.json<ApiError>({ error: "Pull request not found." }, 404);
+      if (t.my_role !== "REVIEWER") return c.json<ApiError>({ error: "Only a reviewer can approve this pull request." }, 409);
+      if (t.state !== "OPEN") return c.json<ApiError>({ error: "The pull request is not open." }, 409);
+      let provider: Awaited<ReturnType<Settings["provider"]>>;
+      try {
+        provider = await settings.provider();
+      } catch {
+        return c.json<ApiError>({ error: "Cannot read the CA file." }, 409);
+      }
+      if (!provider) return c.json(unconfigured, 409);
+      const at = { project: t.project, repo: t.repo, id: t.pr_id };
+      const { status } = c.req.valid("json");
+      let after: string | null;
+      try {
+        const pr = await provider.setReviewStatus(at, s.me, status);
+        after = pr.reviewers.find((r) => isMe(r, s.me))?.status ?? null;
+      } catch (e) {
+        return c.json<ApiError>({ error: reviewProblem(e, at) }, 502);
+      } finally {
+        // The next cycle writes the reviewer list and the activities.
+        void sync.syncNow();
+      }
+      // A settings change during the request switched the database. The ID belongs to the old origin.
+      if (settings.db() === s.db) {
+        setMyStatus(s.db, id, after);
+        changed(id);
+      }
+      if (after !== status) {
+        const now = after === "APPROVED" ? "Approved" : after === "NEEDS_WORK" ? "Needs work" : "no review status";
+        return c.json<ApiError>({ error: `Bitbucket did not apply the change. You now have: ${now}.` }, 502);
+      }
+      return c.json<ReviewStatusResult>({ id, status: after }, 200);
     })
     .post("/follow", json(followUrlInput), async (c) => {
       const config = settings.config();

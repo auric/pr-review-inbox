@@ -30,6 +30,7 @@ import {
   key,
   prLists,
   repoWrites,
+  reviewWrites,
   startFakeBitbucket,
 } from "../tests/support/fake-bitbucket";
 import { JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../tests/support/fake-jira";
@@ -1026,6 +1027,7 @@ for (const [pr, list] of activities) {
       : [commit(head, remote.target, title, author, 500)];
   fake.routes[key("GET", `${pathOf(pr)}/commits`)] = { status: 200, body: S.onePage(commits) };
   fake.routes[key("GET", `${pathOf(pr)}/changes`)] = { status: 200, body: S.onePage(CHANGES.get(head) ?? []) };
+  reviewWrites(fake, pathOf(pr), pr as unknown as Parameters<typeof reviewWrites>[2]);
   fake.routes[key("GET", pathOf(pr))] = () => {
     const state = phase === 2 ? closed.get(pr) : undefined;
     return { status: 200, body: state ? { ...pr, state, updatedDate: min(15) } : pr };

@@ -8,6 +8,7 @@ import {
   Archive,
   BookOpenText,
   Check,
+  CircleAlert,
   CircleCheck,
   CircleDashed,
   CircleQuestionMark,
@@ -45,7 +46,7 @@ import type { BuildDto, PrRow } from "../../shared/dto";
 import { archived } from "../../shared/views";
 import type { ConsultUi } from "../consult/Consult";
 import { useMeta } from "../meta";
-import { useArchive, useFollow } from "../shell/data";
+import { type ReviewStatus, useArchive, useFollow, useReviewStatus } from "../shell/data";
 import { Hint } from "../shell/Hint";
 import { prKey, taskHint } from "../shell/model";
 import { BUILD_WORD, countsText, namedBuild } from "./build";
@@ -300,6 +301,53 @@ function MoreMenu({
         )}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// BRIEF section 9 backlog: the review status of a reviewer on an open PR. A click on the pressed button clears the status.
+// No key: a single-letter key must never approve.
+function ReviewButtons({ pr, forge }: { pr: PrRow; forge: string }) {
+  const review = useReviewStatus();
+  if (pr.role !== "REVIEWER" || pr.state !== "OPEN") return null;
+  const sending = review.isPending ? review.variables.status : null;
+  const button = (status: Exclude<ReviewStatus, "UNAPPROVED">, word: string, hint: { off: string; on: string }, Icon: typeof Check) => {
+    const pressed = pr.status === status;
+    const next = pressed ? "UNAPPROVED" : status;
+    return (
+      <Hint label={pressed ? hint.on : hint.off}>
+        <Button
+          size="sm"
+          variant={pressed ? (status === "APPROVED" ? "default" : "destructive") : "outline"}
+          data-review={status}
+          aria-pressed={pressed}
+          disabled={sending !== null}
+          onClick={() => review.mutate({ id: pr.id, status: next })}
+        >
+          {sending !== null && (sending === status || (pressed && sending === "UNAPPROVED")) ? (
+            <LoaderCircle aria-hidden data-icon="inline-start" className="animate-spin motion-reduce:animate-none" />
+          ) : (
+            <Icon aria-hidden data-icon="inline-start" />
+          )}
+          {word}
+        </Button>
+      </Hint>
+    );
+  };
+  return (
+    <fieldset aria-label="Your review" className="m-0 flex min-w-0 items-center gap-1 border-0 p-0">
+      {button(
+        "APPROVED",
+        "Approve",
+        { off: `Approve on ${forge}`, on: `You approved. Select to remove your approval on ${forge}.` },
+        CircleCheck,
+      )}
+      {button(
+        "NEEDS_WORK",
+        "Needs work",
+        { off: `Mark as needs work on ${forge}`, on: `You marked it as needs work. Select to clear it on ${forge}.` },
+        CircleAlert,
+      )}
+    </fieldset>
   );
 }
 
@@ -573,6 +621,7 @@ export function Header(props: {
         </div>
       </header>
       <ActionBar top={top} label={key} title={title}>
+        <ReviewButtons pr={pr} forge={forge} />
         <Hint label={`Ask ${runner} a question about this pull request. Key: q`}>
           <Button
             id="ask-btn"
