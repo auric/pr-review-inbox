@@ -274,6 +274,45 @@ describe("Jira client", () => {
     expect(issue.comments.map((c) => c.body)).toEqual(["```\nc\n```"]);
   }, 20_000);
 
+  test("a converter that does not start gives the wiki text for every field, and the fetch starts no second worker", async () => {
+    const { fake, source } = setup();
+    fake.routes[key("GET", ISSUE)] = {
+      status: 200,
+      body: { fields: { summary: "S", description: "w" }, renderedFields: { description: "<p><b>w</b></p>" } },
+    };
+    fake.routes[key("GET", `${ISSUE}/comment`)] = page([
+      { body: "c1", renderedBody: "<p><b>c1</b></p>" },
+      { body: "c2", renderedBody: "<p><b>c2</b></p>" },
+    ]);
+    let made = 0;
+    // Bun reports a worker that cannot load as an error event after the constructor returns.
+    class DeadWorker {
+      onerror: (() => void) | null = null;
+      constructor() {
+        made++;
+        queueMicrotask(() => this.onerror?.());
+      }
+      addEventListener() {}
+      postMessage() {}
+      terminate() {}
+    }
+    const real = globalThis.Worker;
+    globalThis.Worker = DeadWorker as unknown as typeof Worker;
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const issue = await source.fetchIssue(ISSUE_KEY);
+      expect(issue.description).toBe("```\nw\n```");
+      expect(issue.comments.map((c) => c.body)).toEqual(["```\nc1\n```", "```\nc2\n```"]);
+      expect(made).toBe(1);
+      expect(logs.mock.calls.filter((a) => String(a[0]).includes("converter"))).toEqual([
+        ["The Jira text converter did not start. The task shows the wiki text."],
+      ]);
+    } finally {
+      globalThis.Worker = real;
+      logs.mockRestore();
+    }
+  });
+
   test("attachments: lenient entries, numeric IDs as digits, bad entries left out, at most 200", async () => {
     const { fake, source } = setup();
     const ok = { id: "1", filename: "a.png", mimeType: "image/png", size: 1, created: "C" };

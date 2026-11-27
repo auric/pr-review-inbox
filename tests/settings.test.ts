@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
+import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/server/app";
-import { dbPath, PROFILES_VERSION, readConfig } from "../src/server/config";
+import { dbPath, PROFILES_VERSION, readConfig, writeConfig } from "../src/server/config";
 import { createLive } from "../src/server/live";
 import { log } from "../src/server/log";
 import { EXPLAIN_V2, type Profile, profileRevision, RETIRED_PROFILES, SHIPPED_PROFILES, shippedHash } from "../src/server/review/catalog";
 import { createSecrets, type SecretBackend } from "../src/server/secrets";
 import { createSettings, type Settings } from "../src/server/settings";
-import { profileInput, type SettingsDto } from "../src/shared/dto";
+import { profileInput, type SettingsDto, type TaskPreviewDto } from "../src/shared/dto";
 import { FAKE_TOKEN, type FakeBitbucket, fixture, key, startFakeBitbucket, TEST_CA_FILE } from "./support/fake-bitbucket";
 import { type FakeJira, JIRA_EMAIL, JIRA_TOKEN, startFakeJira } from "./support/fake-jira";
 import { DASHBOARD_PATH } from "./support/scenarios";
@@ -1316,5 +1317,54 @@ describe("Jira settings (plan r2 S-JIRA)", () => {
     } finally {
       cloud.stop();
     }
+  });
+});
+
+describe("task rules preview over stored PRs", () => {
+  const ID = String.raw`[A-Z][A-Z0-9]+-\d+`;
+
+  test("only followed or dashboard PRs that are not archived; a time-out on a stored PR flags its rule", async () => {
+    writeConfig(dir, { baseUrl: fake.url, userSlug: "jdoe", notifications: false });
+    const settings = createSettings({ dir, secrets: createSecrets(null), taskBudget: { budgetMs: 50, retryBudgetMs: 100 } });
+    opened.push(settings);
+    const db = settings.db() as Database;
+    const insert = (prId: number, followed: number, dashboard: number, archived: number | null, description: string | null) =>
+      (
+        db
+          .query(
+            `INSERT INTO pull_request (project, repo, pr_id, title, description, author_slug, author_name, my_role, state, source_head,
+              target_head, source_branch, target_branch, updated_date, on_dashboard, followed, archived_at)
+            VALUES ('PROJ', 'repo', $prId, $title, $description, 'asmith', 'Alex Smith', 'REVIEWER', 'OPEN', 'a', 'b', 'feature', 'main',
+              1000, $dashboard, $followed, $archived) RETURNING id`,
+          )
+          .get({ prId, title: `[ABC-${prId}] Change`, description, followed, dashboard, archived }) as { id: number }
+      ).id;
+    const followedOnly = insert(1, 1, 0, null, `${"a".repeat(19_999)}!`);
+    const dashboardOnly = insert(2, 0, 1, null, null);
+    const archived = insert(3, 1, 1, 5, null);
+    const neither = insert(4, 0, 0, null, null);
+    const app = createApp({ port: PORT, token: SESSION, live: createLive(), settings });
+    const res = await app.request(`${ORIGIN}/api/settings/task-rules/preview`, {
+      method: "POST",
+      headers: { host: `127.0.0.1:${PORT}`, origin: ORIGIN, "x-rl-session": SESSION, "content-type": "application/json" },
+      body: JSON.stringify({
+        rules: [
+          { source: "description", pattern: "(a+)+$" },
+          { source: "title", pattern: ID },
+        ],
+        prs: [neither, archived, dashboardOnly, followedOnly],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TaskPreviewDto;
+    expect(body.rules).toEqual([
+      { error: null, timedOut: true },
+      { error: null, timedOut: false },
+    ]);
+    expect(body.sample).toBeNull();
+    expect(body.prs.map((p) => [p.id, p.prId, p.tasks])).toEqual([
+      [dashboardOnly, 2, [{ key: "ABC-2", source: "title" }]],
+      [followedOnly, 1, [{ key: "ABC-1", source: "title" }]],
+    ]);
   });
 });

@@ -25,7 +25,7 @@ import {
   type SettingsDto,
   type TaskContextDto,
 } from "../../src/shared/dto";
-import { key } from "../support/fake-bitbucket";
+import { key, type Reply } from "../support/fake-bitbucket";
 import { attachmentPath, type FakeJira, ISSUE_KEY, JIRA_TOKEN, logOf, pngOf, startFakeJira } from "../support/fake-jira";
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
@@ -448,6 +448,33 @@ describe("task attachments (plan r3 S-ATT)", () => {
       body: { error: "Jira sent the file from another address. The app downloads only from the Jira URL." },
     } as never);
     expect(files(s.pr)).toEqual([]);
+  });
+
+  test("a second download of the same file while one runs gives 409; the first one stores the file", async () => {
+    const s = await fetched();
+    const path = key("GET", attachmentPath("10100", "screenshot.png"));
+    const ok = jira.routes[path] as Reply;
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let asked = 0;
+    jira.routes[path] = async () => {
+      asked++;
+      await gate;
+      return ok;
+    };
+    const first = s.download("10100");
+    const end = Date.now() + 10_000;
+    while (asked === 0) {
+      if (Date.now() > end) throw new Error("the first download never reached Jira");
+      await Bun.sleep(10);
+    }
+    expect(await s.download("10100")).toEqual({ status: 409, body: { error: "This file is downloading." } } as never);
+    release();
+    expect(await first).toMatchObject({ status: 200, body: { id: "10100", sha256: sha(PNG) } });
+    expect(asked).toBe(1);
+    expect(files(s.pr)).toEqual(["10100-screenshot.png"]);
   });
 
   test("PUT sets include; DELETE removes the row and the file", async () => {
