@@ -192,7 +192,7 @@ function Shell({ stale }: { stale: boolean }) {
   const [query, setQuery] = useState(r0?.q ?? "");
   const [doneOpen, setDoneOpen] = useState(false);
   const [ks, setKs] = useState<KeyState>(() => {
-    const detail = start.route.kind === "settings" || !!r0?.pr;
+    const detail = start.route.kind === "settings" || !!r0?.pr || r0?.task != null;
     return {
       ...INITIAL,
       settings: start.route.kind === "settings",
@@ -567,7 +567,7 @@ function Shell({ stale }: { stale: boolean }) {
     const typing = (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && !box) || t.isContentEditable;
     const onButton = (t.tagName === "BUTTON" && !t.hasAttribute("data-row")) || t.tagName === "A" || t.tagName === "SUMMARY" || box;
     const layer = (tasksView ? taskApi.current?.layer(e.target) : detailApi.current?.layer(e.target)) ?? null;
-    const dialog = !!t.closest('[role="dialog"]') || !!document.querySelector('[data-slot="dialog-content"]');
+    const dialog = !!t.closest('[role="dialog"]') || !!document.querySelector('[data-slot="dialog-content"]:not([data-closed])');
     // The Tasks view moves over task rows. The keys of a PR do nothing there: no PR detail shows.
     const r = reduceKey(tasksView ? { ...state, selected: shownTask } : state, e.key, {
       ids: tasksView ? taskIds : ids,

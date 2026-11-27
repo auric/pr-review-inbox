@@ -542,9 +542,18 @@ test("keys j, k, Enter, Esc, /, n, N, o, g f, and ? work", async ({ page }) => {
   await expect(page.locator("#s-files")).toHaveAttribute("open", "");
   await expect(page.locator("#s-files").getByRole("button", { name: "Get the code", exact: true })).toBeFocused();
 
+  // A low window: the help stays inside it and scrolls to its last row.
+  await page.setViewportSize({ width: 1440, height: 700 });
   await page.keyboard.press("?");
   const help = page.getByRole("dialog", { name: "Keyboard shortcuts" });
   await expect(help).toBeVisible();
+  const box = await help.boundingBox();
+  expect(box?.y).toBeGreaterThanOrEqual(0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(700);
+  await expect(help.getByRole("heading", { name: "Keyboard shortcuts" })).toBeInViewport();
+  const close = help.locator("[data-slot='dialog-footer']").getByRole("button", { name: "Close" });
+  await close.scrollIntoViewIfNeeded();
+  await expect(close).toBeInViewport();
   await page.keyboard.press("Escape");
   await expect(help).toHaveCount(0);
 });

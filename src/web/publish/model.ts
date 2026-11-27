@@ -2,11 +2,26 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // Pure publish UI rules (plan v3 WP14a, docs/plans/replies.md step 4). No DOM access, so bun test runs them directly.
+import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
 import type { BlockedDraft, BlockedReason, CommentDto, PlannedPost, PostDestination, PostDto } from "../../shared/dto";
+import { snippet } from "../../shared/outcome";
 import { commentLines } from "../../shared/types";
 import { lineText, plural } from "../review/model";
 
 const base = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+
+// A post body is Markdown. The parse uses the remark-parse and remark-gfm of the Markdown view.
+type MdNode = { type: string; value?: string; alt?: string | null; children?: MdNode[] };
+const md = unified().use(remarkParse).use(remarkGfm);
+// The children of these nodes are one run of text. Other children are blocks, with a space between them.
+const PHRASING = new Set(["paragraph", "heading", "emphasis", "strong", "delete", "link", "linkReference", "tableCell"]);
+const mdText = (n: MdNode): string =>
+  n.type === "break" ? " " : (n.value ?? n.alt ?? (n.children ?? []).map(mdText).join(PHRASING.has(n.type) ? "" : " "));
+
+// One line of the plain text of a post body, cut at n characters.
+export const postSnippet = (body: string, n: number) => snippet(mdText(md.parse(body) as MdNode), n);
 
 // prototype/v3 destText: "2 inline comments and 1 general comment". A reply post without a body only resolves its thread.
 // A reply in a resolved thread reopens the thread first.

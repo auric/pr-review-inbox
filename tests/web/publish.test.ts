@@ -19,6 +19,7 @@ import {
   parseDraft,
   planItems,
   planSig,
+  postSnippet,
   postView,
   readyLine,
   reopenNote,
@@ -318,6 +319,18 @@ describe("outbox rows", () => {
       [3, "pending"],
     ]);
     expect(mergePosts(undefined, [post(1, inline)]).map((p) => p.id)).toEqual([1]);
+  });
+});
+
+describe("post snippet", () => {
+  test("a posted body shows as one line of plain text, without the Markdown marks", () => {
+    expect(postSnippet("\u{1F916} **Blocker:** The lock covers `write()`. See [the docs](https://example.test/a).", 160)).toBe(
+      "\u{1F916} Blocker: The lock covers write(). See the docs.",
+    );
+    expect(postSnippet("# Title\n\n- one *item*\n- ~~two~~\n\n```ts\nconst a = 1;\n```", 160)).toBe("Title one item two const a = 1;");
+    expect(postSnippet("first  \nsecond\nthird", 160)).toBe("first second third");
+    expect(postSnippet("**Nit:** abcdefgh", 10)).toBe("Nit: abcd…");
+    expect(postSnippet("", 10)).toBe("");
   });
 });
 

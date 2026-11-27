@@ -6,6 +6,11 @@
 - Review: the run details show "N changed files that no agent read." when a review did not open every changed file. The count costs no Claude usage.
 - Review profiles: the new switch "Git history" lets a review run read why the changed lines were written, from the git history. It is off by default.
 - Replies: when you post your own reply in a thread with a Claude reply draft, the confirm offers "Also discard Claude's draft reply in this thread", ticked by default. The draft goes after your reply posts, so it no longer counts as out of date.
+- Keys: in the post confirm and the run log, pull request keys such as q (Ask) and w (Explain) no longer act. Before, they moved the focus out of the confirm. Only Esc and ? work there.
+- Dialogs: a dialog taller than the window now scrolls inside the window. The keyboard help ("?") opens at its top, so you can read every key on a low screen.
+- Dialogs: a long dialog title now wraps before the close button. Before, the close button covered the end of the title.
+- Posts: a posted comment in "Posts to Bitbucket" now shows as plain text. Before, it showed Markdown marks such as **Blocker:**.
+- Tasks: a task link opened on a narrow screen now shows the task. Before, it showed the Tasks list and the address lost the task.
 - Build a Jira task: the questions screen has "Copy as Markdown" and "Save .md". They give you the open questions with their options, so you can answer them in your own Claude Code session first.
 - My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."
 - Inbox: the "1 updated · re-sort" chip no longer stays for a pull request that you opened from a link outside the view. Before, a click on the chip did not clear it.

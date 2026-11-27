@@ -167,6 +167,21 @@ describe("detail keys", () => {
     expect(text).toBe("Resolve the current thread on the server, or reopen it when it is resolved");
   });
 
+  test("a dialog keeps every key but Esc and ?, so no key acts on the PR or the list behind it", () => {
+    const dlg = { ...C, dialog: true };
+    for (const st of [
+      { ...S, selected: 20 },
+      { ...S, selected: 20, focus: "detail" as const },
+    ]) {
+      for (const k of ["d", "p", "r", "a", "e", "f", "F", "c", "q", "x", "z", "g", "j", "k", "/", "Enter", "ArrowLeft", "ArrowRight"]) {
+        expect(reduceKey(st, k, dlg)).toMatchObject({ handled: false, effect: null, state: st });
+      }
+    }
+    expect(reduceKey({ ...S, selected: 20 }, "?", dlg).state.help).toBe(true);
+    expect(reduceKey({ ...S, selected: 20, help: true }, "?", dlg).state.help).toBe(false);
+    expect(reduceKey({ ...S, selected: 20, focus: "detail" }, "Escape", { ...dlg, layer: "confirm" }).effect).toBe("close-confirm");
+  });
+
   // Plan r2 UI-ASK, pr-view-v4 2.4: q opens Ask in the panel slot. In a text field, q is a letter.
   test("q asks; it does nothing while typing or without a PR", () => {
     expect(reduceKey({ ...S, selected: 20 }, "q", C)).toMatchObject({ effect: "ask", state: { focus: "detail", mobile: "detail" } });

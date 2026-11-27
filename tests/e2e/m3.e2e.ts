@@ -156,6 +156,26 @@ test("A8: two of the drafts are accepted, and exactly those two texts post after
   );
 });
 
+test("the detail keys do nothing in the post confirm: q, w, d, and a leave the confirm open and the draft untriaged", async ({ page }) => {
+  await connect(page);
+  await reviewed(page);
+  await drafts(page).nth(0).getByRole("button", { name: "Accept" }).click();
+  await expect(drafts(page).nth(1)).toBeFocused();
+  await page.keyboard.press("p");
+  const box = confirmBox(page);
+  await expect(postButton(box)).toBeFocused();
+  for (const key of ["q", "w", "d", "a"]) {
+    await page.keyboard.press(key);
+    await expect(box).toBeVisible();
+    await expect(postButton(box)).toBeFocused();
+  }
+  await page.keyboard.press("Escape");
+  await expect(box).toBeHidden();
+  await expect(drafts(page).nth(1)).not.toHaveAccessibleName(/^(Discarded|Accepted)/);
+  await expect(page.getByText("Ready to post: 1 inline comment")).toBeVisible();
+  expect(await posts()).toEqual([]);
+});
+
 test("A9: the connection drops after Bitbucket accepts; the outcome is unknown, and Post again finds it with no second post", async ({
   page,
 }) => {

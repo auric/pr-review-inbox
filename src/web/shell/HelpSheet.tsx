@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
+import { useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
 import { HELP_KEYS } from "../keys";
 
 export function HelpSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  // The first button is Close at the bottom. The focus on it would scroll a low window past the first keys.
+  const title = useRef<HTMLHeadingElement>(null);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* Only the ? key opens this sheet. */}
-      <DialogContent className="sm:max-w-[480px]" instant>
-        <DialogTitle>Keyboard shortcuts</DialogTitle>
+      <DialogContent className="sm:max-w-[480px]" instant initialFocus={title}>
+        <DialogTitle ref={title} tabIndex={-1} className="outline-none">
+          Keyboard shortcuts
+        </DialogTitle>
         {HELP_KEYS.map((g) => (
           <section key={g.group} className="grid gap-2">
             <h3 className="m-0 text-sm font-semibold">{g.group}</h3>

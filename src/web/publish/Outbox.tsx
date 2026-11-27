@@ -14,12 +14,11 @@ import type { CommentDto, PostDto, ReviewItemDto } from "../../shared/dto";
 import { commentUrl } from "../../shared/links";
 import { restoreDraft } from "../pr/ReplyComposer";
 import { ForgeLink, Text } from "../pr/Thread";
-import { snippet } from "../pr/threads";
 import { replyKey, sendItem } from "../review/data";
 import type { Hints } from "../shell/Hint";
 import { failText } from "../shell/model";
 import { dropPost, planKey, postsKey, replyDiscards, retryPost, retryResolve, usePosts } from "./data";
-import { destLabel, mergePosts, type PostView, postView, shownPosts, splitPosts } from "./model";
+import { destLabel, mergePosts, type PostView, postSnippet, postView, shownPosts, splitPosts } from "./model";
 
 const icon = "size-[15px] shrink-0";
 
@@ -203,6 +202,7 @@ type LinkProps = { web: string | null; hints: Hints };
 function RunPost({ p, comments, forge, ctx, web, hints }: { p: PostDto; comments: CommentDto[]; forge: string; ctx: PostCtx } & LinkProps) {
   const v = postView(p);
   const d = destLabel(p.destination, comments);
+  const text = useMemo(() => postSnippet(p.body, 160), [p.body]);
   return (
     <article
       id={`p-${p.id}`}
@@ -219,7 +219,7 @@ function RunPost({ p, comments, forge, ctx, web, hints }: { p: PostDto; comments
         ) : (
           <span className="shrink-0 text-foreground">{d.text}</span>
         )}
-        <span className="min-w-0 flex-1 truncate text-ink-2">{snippet(p.body, 160)}</span>
+        <span className="min-w-0 flex-1 truncate text-ink-2">{text}</span>
         <StateMark v={v} />
         <PostedLink p={p} v={v} web={web} forge={forge} hints={hints} />
       </div>

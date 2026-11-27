@@ -36,7 +36,7 @@ export type KeyContext = {
   narrow?: boolean;
   // Full width is on: the detail hides the sidebar and the list (plan pr-view-v4 4.3).
   full?: boolean;
-  // Focus is in a dialog, or a modal dialog is open. x then does nothing.
+  // Focus is in a dialog, or a modal dialog is open. Only Esc and ? then work.
   dialog?: boolean;
   // The Explain page shows in the detail (docs/plans/review-v2/spec.md section 3.1). The keys of the hidden PR then do nothing.
   explain?: boolean;
@@ -148,6 +148,8 @@ export function reduceKey(state: KeyState, key: string, ctx: KeyContext): KeyRes
     return back(s, ctx);
   }
   if (ctx.typing) return ignore(s);
+  // A dialog keeps its own keys. The shell keys must not act on the PR or the list behind it.
+  if (ctx.dialog && key !== "?") return ignore(s);
   if (key === "?") return done({ ...s, help: !s.help });
   if (s.help) return ignore(s);
   // The second key of "g f", "g c", or "g d". Any other key ends the chord.
@@ -176,9 +178,9 @@ export function reduceKey(state: KeyState, key: string, ctx: KeyContext): KeyRes
       return back(s, ctx);
     case "g":
       return prKeys ? done({ ...s, chord: ctx.now }) : ignore(s);
-    // x resolves the current thread, or reopens it when it is resolved. It never acts behind a dialog or the post confirm.
+    // x resolves the current thread, or reopens it when it is resolved. It never acts behind the post confirm.
     case "x":
-      return prKeys && !ctx.dialog && ctx.layer !== "confirm" ? done(inDetail, "resolve") : ignore(s);
+      return prKeys && ctx.layer !== "confirm" ? done(inDetail, "resolve") : ignore(s);
     case "z":
       return hasPr && !ctx.narrow ? done(inDetail, ctx.full ? "full-off" : "full-on") : ignore(s);
     default: {
