@@ -3280,6 +3280,48 @@ describe("ps5-plan.md section 4.4 (AC-B379): the quick review row of the Log", (
   });
 });
 
+// task-builder-v2.md section 7.6: the files that a run left in ./out, each with its Download link, and one line for the skipped ones.
+describe("the files from the runner in the Log", () => {
+  const out = (o: Partial<NonNullable<TaskStepDto["detail"]["out"]>>) =>
+    stepDetail.parse({ out: { dir: "3", files: [], skipped: [], ...o } });
+  const html = (detail: TaskStepDto["detail"]) =>
+    renderToStaticMarkup(
+      createElement(LogTab, {
+        t: building({ steps: [step({ id: 3, kind: "implement", part: 7, detail })] }),
+        runner: R,
+        onRunLog: () => {},
+      }),
+    );
+
+  test("each kept file gets the download route by its index; skipped files and the rest go on one line", () => {
+    const h = html(
+      out({
+        files: [
+          { path: "report.md", size: 2048 },
+          { path: "sub/data.json", size: 3 },
+        ],
+        skipped: [{ path: "big.bin", reason: "over 10 MB" }],
+        more: 2,
+      }),
+    );
+    expect(h).toContain('aria-label="Files from Claude"');
+    expect(
+      [...h.matchAll(/<a href="([^"]+)" download=""[^>]*>Download<span class="sr-only"> ([^<]+)<\/span>/g)].map((m) => [m[1], m[2]]),
+    ).toEqual([
+      ["/api/tasks/1/steps/3/out/0", "report.md"],
+      ["/api/tasks/1/steps/3/out/1", "sub/data.json"],
+    ]);
+    expect(h).toContain("Not kept: big.bin (over 10 MB) and 2 more");
+  });
+
+  test("a run with only skipped files shows no list; a run with no out shows nothing", () => {
+    const h = html(out({ skipped: [{ path: "a.exe", reason: "a link" }] }));
+    expect(h).not.toContain("Files from Claude");
+    expect(h).toContain("Not kept: a.exe (a link)");
+    expect(html(stepDetail.parse({}))).not.toContain("data-step-out");
+  });
+});
+
 // docs/plans/review-v2/ps6-ps7-plan.md section 4, PS6-C, AC-B398: the PR comment rows of a task PR, one test each, at most one primary,
 // in the order of section 2.1.
 describe("AC-B398: the PR comment rows of a task PR", () => {

@@ -8,6 +8,7 @@
 // and the policy question, and the Attachments tab (spec.md section 6.17). Then Settings > Tasks. Runs against serve.ts
 // only: the fake Bitbucket, the fake Jira, the fake CLI, and a local git remote. The approved test command is "bun test" in the task
 // worktree.
+import { readFileSync } from "node:fs";
 import { test as base, expect, type Page } from "@playwright/test";
 import {
   APP_PORT,
@@ -76,6 +77,8 @@ import { readFileSync } from "node:fs";
 test("the README title says that the app works", () => expect(readFileSync("README.md", "utf8")).toContain("works"));
 `;
 const README = "# Sample works\n";
+// task-builder-v2.md section 7.6: a file that the build run leaves in ./out for the user.
+const OUT_REPORT = "# Build report";
 const MINOR = {
   path: "README.md",
   side: "new",
@@ -164,6 +167,7 @@ test("a small task: the Build form, questions, plan with the branch and the warn
           writes: [
             { path: "repo/tests/readme.test.ts", text: README_TEST },
             { path: "repo/README.md", text: README },
+            { path: "out/report.md", text: OUT_REPORT },
           ],
           ticks: { path: "*", ids: ["*"] },
         },
@@ -221,6 +225,12 @@ test("a small task: the Build form, questions, plan with the branch and the warn
   expect(md).toMatch(/^# Open questions: \S+ /);
   expect(md).toContain("Why it matters: Echo: it changes the tests.");
   expect(md).toMatch(/^1\. Keep it.* \(recommended\)$/m);
+  // Save .md downloads the same text as a file named after the key.
+  const saved = page.waitForEvent("download");
+  await form.getByRole("button", { name: "Save .md" }).click();
+  const file = await saved;
+  expect(file.suggestedFilename()).toBe("ABC-42-questions.md");
+  expect(readFileSync((await file.path()) as string, "utf8")).toBe(md);
   await primary(page).click();
   await expect(form.getByRole("radio", { name: /Keep it/ })).toBeFocused();
   await form.getByRole("button", { name: "Send answers" }).click();
@@ -324,6 +334,15 @@ test("a small task: the Build form, questions, plan with the branch and the warn
       .getByText(new RegExp(`This PR has \\d+ changed lines, over your ${LIMIT} limit\\.`))
       .first(),
   ).toBeVisible();
+  // The build run left out/report.md. Its Log row lists it, and Download gives the same bytes.
+  const outList = page.getByRole("tabpanel").getByRole("list", { name: /^Files from / });
+  await expect(outList.getByRole("listitem")).toHaveCount(1);
+  await expect(outList.getByRole("listitem")).toContainText("report.md");
+  const got = page.waitForEvent("download");
+  await outList.getByRole("link", { name: "Download report.md" }).click();
+  const outFile = await got;
+  expect(outFile.suggestedFilename()).toBe("report.md");
+  expect(readFileSync((await outFile.path()) as string, "utf8")).toBe(OUT_REPORT);
   await page.getByRole("tab", { name: "Diff" }).click();
   await expect(page.getByRole("tabpanel").getByText("README.md", { exact: true })).toBeVisible();
 

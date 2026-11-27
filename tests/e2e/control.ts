@@ -196,6 +196,8 @@ export type ClaudeScenario = {
   // match: the fields of a run whose context files hold a text, so parts that build at the same time get their own results.
   match?: FakeScenario["match"];
   bySchema?: FakeScenario["bySchema"];
+  // thorough-review.md WP-T1c: the fields of a run whose run folder name matches the regex key. "-2$" is arm 2 of a Thorough review.
+  byCwd?: FakeScenario["byCwd"];
   login?: string;
   // part-session.md section 2.11: each seq entry with exitCode 1 and no fixture replays the synthetic usage limit with this resetsAt
   // (epoch seconds).
@@ -216,7 +218,9 @@ export type PostControl = {
 export type PostBody = { text: string; parent?: { id: number }; anchor?: Record<string, unknown> };
 
 // Test-only control routes on the fake Bitbucket. The app has no such route.
-export async function control(action: "reset" | "restart" | "shutdown" | "task-pr-approve"): Promise<void>;
+export async function control(
+  action: "reset" | "restart" | "shutdown" | "task-pr-approve" | "task-pr-merge" | "stack-child",
+): Promise<void>;
 export async function control(action: "state", change: Partial<Scenario>): Promise<void>;
 export async function control(action: "claude", change: ClaudeScenario): Promise<void>;
 export async function control(action: "plan-check", change: { on: boolean }): Promise<void>;

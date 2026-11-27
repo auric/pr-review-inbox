@@ -191,6 +191,7 @@ function setClaude(c: ClaudeScenario) {
     seq: usageSeq(c.seq, c.usageAt),
     match: c.match,
     bySchema: c.bySchema ?? { verify: { fixture: CHECK_STREAM } },
+    byCwd: c.byCwd,
     authMethod: c.login,
   });
 }
@@ -910,6 +911,33 @@ r[key("POST", "/__control/task-pr-approve")] = async () => {
   pr.reviewers = [{ user: alex as unknown as (typeof pr.reviewers)[number]["user"], role: "REVIEWER", approved: true, status: "APPROVED" }];
   pr.version++;
   pr.updatedDate++;
+  await app.sync.syncNow();
+  return ok({ pr: pr.id });
+};
+// stacked-prs.md WP-SK3: a colleague opens a child PR of PR A, from stack/child into the source branch of PR A. The open-PR list of the
+// repository then lists it, so the branch search finds it. A reset lists the inbox PRs again. Answers the child PR ID.
+r[key("POST", "/__control/stack-child")] = async () => {
+  if (!listTaskPrs || typeof createTaskPr !== "function") return NOT_FOUND;
+  const res = await (createTaskPr as (req: Request) => Promise<Reply>)(
+    new Request(`${fake.url}${taskRepo.path}/pull-requests`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Read the batch under the lock",
+        fromRef: { id: "refs/heads/stack/child" },
+        toRef: { id: (A.pr.fromRef as unknown as { id: string }).id },
+      }),
+    }),
+  );
+  const id = "body" in res ? (res.body as { id?: number } | undefined)?.id : undefined;
+  if (id === undefined) return NOT_FOUND;
+  r[key("GET", `${taskRepo.path}/pull-requests`)] = listTaskPrs;
+  return ok({ pr: id });
+};
+// task-builder-v2.md section 11.1: a colleague merges the newest open task PR. One sync reads it. The MERGED activity names no commit.
+r[key("POST", "/__control/task-pr-merge")] = async () => {
+  const pr = [...taskRepo.prs.values()].filter((p) => p.state === "OPEN").at(-1);
+  if (!pr) return NOT_FOUND;
+  taskRepo.merge(pr.id);
   await app.sync.syncNow();
   return ok({ pr: pr.id });
 };

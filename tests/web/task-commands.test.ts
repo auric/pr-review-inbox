@@ -3,6 +3,11 @@
 
 // The command line of an editable task command (src/web/tasks/commands.ts). The line is only the text form of an argv list.
 import { describe, expect, test } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import type { TaskDto } from "../../src/shared/dto";
+import type { TaskCommand } from "../../src/shared/task";
+import { CommandsEditor } from "../../src/web/tasks/CommandsEditor";
 import {
   defaultMinutes,
   draftProblem,
@@ -93,5 +98,65 @@ describe("task command lines", () => {
     expect(placeholderWarning("bun test")).toBeNull();
     // Each argument counts alone, so <a and b> in two arguments are no placeholder.
     expect(placeholderWarning("cmd <a b>")).toBeNull();
+  });
+});
+
+// task-builder-v2.md section 6.1: the plan screen shows the check of argv[0] per row, and the approval refuses a ticked command that
+// cannot run here.
+describe("the command checks of the plan screen", () => {
+  type Local = "runs" | "missing" | "refused";
+  const cmd = (id: string, argv: string[], local: Local): TaskCommand & { local: Local } => ({
+    id,
+    name: id,
+    kind: "test",
+    argv,
+    timeoutSec: 600,
+    local,
+  });
+  const cmds = [cmd("unit", ["bun", "test"], "runs"), cmd("make", ["make", "check"], "missing"), cmd("bat", ["run.cmd"], "refused")];
+  const drafts = cmds.map(toDraft);
+  const local = new Map(cmds.map((c) => [c.id, { argv0: c.argv[0] as string, local: c.local }]));
+
+  test("each row shows its check; a changed program shows none", () => {
+    const html = (ds = drafts) =>
+      renderToStaticMarkup(
+        createElement(CommandsEditor, {
+          idPrefix: "p",
+          drafts: ds,
+          onChange: () => {},
+          picked: new Set(ds.map((d) => d.id)),
+          onPick: () => {},
+          local,
+          newPrefix: "new",
+        }),
+      );
+    const rows = (h: string) =>
+      [...h.matchAll(/data-command-local="(\w+)"[^>]*>(?:<svg[\s\S]*?<\/svg>)?([^<]*)/g)].map((m) => [m[1], m[2]]);
+    expect(rows(html())).toEqual([
+      ["runs", "Runs here"],
+      ["missing", "Not found on this computer"],
+      ["refused", "Runs through cmd.exe, which the app refuses"],
+    ]);
+    expect(rows(html(drafts.map((d) => (d.id === "make" ? { ...d, line: "bun run check" } : d))))).toEqual([
+      ["runs", "Runs here"],
+      ["refused", "Runs through cmd.exe, which the app refuses"],
+    ]);
+  });
+
+  test("the approval refuses a ticked missing or refused command, until it is unticked or changed", async () => {
+    // PlanTab imports src/web/api.ts, which reads the session meta of the page at load.
+    const g = globalThis as { document?: unknown };
+    const before = g.document;
+    g.document ??= { querySelector: () => null };
+    const { planProblem } = await import("../../src/web/tasks/PlanTab").finally(() => {
+      g.document = before;
+    });
+    const t = { plan: { commands: cmds, warning: null } } as unknown as TaskDto;
+    const pick = (...ids: string[]) => drafts.filter((d) => ids.includes(d.id));
+    expect(planProblem(t, pick("unit", "make"), false)).toBe("make cannot run on this computer. Untick it, or change the command.");
+    expect(planProblem(t, pick("unit", "bat"), false)).toBe("bat cannot run on this computer. Untick it, or change the command.");
+    expect(planProblem(t, pick("unit"), false)).toBeNull();
+    const changed = pick("unit", "make").map((d) => (d.id === "make" ? { ...d, line: "bun run check" } : d));
+    expect(planProblem(t, changed, false)).toBeNull();
   });
 });

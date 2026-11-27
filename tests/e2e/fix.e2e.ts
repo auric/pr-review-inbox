@@ -354,7 +354,9 @@ test("a dirty clone keeps Apply disabled; a clean one commits; Undo resets the c
 
   // Undo: HEAD goes back, the tree stays clean, the Fixed in draft is discarded, and the draft that it replaced comes back.
   await fixCard(page, LOCK).getByRole("button", { name: "Undo" }).click();
-  await expect(page.locator("p[role='status'].sr-only")).toContainText(`Undone. Your clone is back at ${before.slice(0, 7)}.`);
+  await expect(page.locator("p[role='status'].sr-only")).toContainText(`Undone. Your clone is back at ${before.slice(0, 7)}.`, {
+    timeout: COMMIT_MS,
+  });
   await expect(fixCard(page, LOCK)).toBeFocused();
   expect((await cloneState(path)).head).toBe(before);
   expect(git(path, ["status", "--porcelain"])).toBe("");
@@ -427,7 +429,9 @@ test("a failing pre-commit hook leaves the edits staged; the dialog shows its st
   await expect(box.getByRole("button", { name: "Apply and commit" })).toHaveAttribute("aria-disabled", "true");
 
   await alert.getByRole("button", { name: "Undo the staged edits" }).click();
-  await expect(page.locator("p[role='status'].sr-only")).toContainText(`Undone. Your clone is back at ${before.slice(0, 7)}.`);
+  await expect(page.locator("p[role='status'].sr-only")).toContainText(`Undone. Your clone is back at ${before.slice(0, 7)}.`, {
+    timeout: COMMIT_MS,
+  });
   await expect(box.getByRole("alert")).toHaveCount(0);
   expect(git(path, ["status", "--porcelain"])).toBe("");
   await page.keyboard.press("Escape");
@@ -716,7 +720,9 @@ test("Fix on an accepted finding: its edit shows under it, Apply commits it, it 
 
   // Undo: the clone goes back, and the finding is accepted again.
   await card.getByRole("button", { name: "Undo" }).click();
-  await expect(page.locator("p[role='status'].sr-only")).toContainText(`Undone. Your clone is back at ${before.slice(0, 7)}.`);
+  await expect(page.locator("p[role='status'].sr-only")).toContainText(`Undone. Your clone is back at ${before.slice(0, 7)}.`, {
+    timeout: COMMIT_MS,
+  });
   expect((await cloneState(path)).head).toBe(before);
   await expect(head).toContainText("Accepted");
   await expect(head).not.toContainText("Fixed in");

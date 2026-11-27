@@ -240,3 +240,46 @@ test("setup: commands by kind, the time limit with its reason, the live output, 
   await expect.poll(async () => (await settings(page)).taskCache).toBe(true);
   await expect(box.getByLabel("Time limit (min) of deps")).toHaveValue("1");
 });
+
+// task-builder-v2.md section 6.3: a build command that does not start is a fault of this computer. The part stops with "Run the checks
+// again" and starts no fix run, and the test command after the failed build is skipped. A path relative to the worktree passes the
+// approval, because only the run can judge it.
+test("a check that cannot run here stops the part with Run the checks again, and the later checks say Skipped", async ({ page }) => {
+  test.setTimeout(600_000);
+  const commands = [
+    { name: "compile", kind: "build", argv: ["./rl-no-such-build"] },
+    { name: "test", kind: "test", argv: ["bun", "test"] },
+  ];
+  await control("claude", { ...CLAUDE, spec: { ...SPEC, testing: { ...SPEC.testing, commands } } });
+  await openApp(page);
+  await page.getByLabel("Bitbucket URL").fill(FAKE_URL);
+  await page.getByLabel("Access token").fill(E2E_TOKEN);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByLabel("Access token")).toBeHidden();
+  await control("state", { task: true });
+  expect((await api(page, "PUT", "/api/settings/jira", { baseUrl: JIRA_URL, token: E2E_JIRA_TOKEN })).status).toBe(200);
+  const prs = (await api(page, "GET", "/api/prs")).json as { id: number; prId: number }[];
+  const prA = prs.find((p) => p.prId === 1001)?.id as number;
+  expect((await api(page, "PUT", `/api/prs/${prA}/clone`, { path: await makeClone(1001) })).status).toBe(200);
+  await page.reload();
+
+  await buildTask(page, REPO);
+  await expect(status(page)).toHaveText(/^\S+ has 2 questions before it writes the plan\.$/, { timeout: 60_000 });
+  await page.getByRole("form", { name: "Questions" }).getByRole("button", { name: "Send answers" }).click();
+  await expect(status(page)).toHaveText("The plan is ready: small, 1 PR, about 5 changed lines.", { timeout: 60_000 });
+  await page.getByRole("checkbox", { name: "I understand" }).check();
+  await primary(page).click();
+
+  const stop =
+    'Needs you: the check "compile" of part 1 cannot run on this computer: Not found: ./rl-no-such-build. Change it in Settings, Commands, then run the checks again.';
+  await expect(status(page)).toHaveText(stop, { timeout: 240_000 });
+  await expect(primary(page)).toHaveText("Run the checks again");
+  await page.getByRole("tab", { name: "Log" }).click();
+  await expect(page.locator("[data-task-item] details", { hasText: "bun test" }).first()).toContainText("Skipped: build compile failed");
+
+  // The command is still missing, so the checks run again and stop again.
+  await primary(page).click();
+  await expect(primary(page)).toHaveCount(0, { timeout: 30_000 });
+  await expect(status(page)).toHaveText(stop, { timeout: 240_000 });
+  await expect(primary(page)).toHaveText("Run the checks again");
+});
