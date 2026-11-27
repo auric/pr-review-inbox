@@ -35,7 +35,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
-import type { ExcerptLine, PostDto } from "../../shared/dto";
+import type { ExcerptLine, PostDto, ReviewItemDto } from "../../shared/dto";
 import { commentUrl } from "../../shared/links";
 import type { ResolveOutcome } from "../publish/data";
 import { type PostCtx, ReplyPosts } from "../publish/Outbox";
@@ -143,6 +143,8 @@ export type ThreadCtx = {
   setResolved: (thread: number, resolved: boolean, seen: number) => Promise<ResolveOutcome>;
   // Opens the log sheet of one run, for the AI lines of the thread history.
   onLog: (run: number) => void;
+  // The current reply draft of the thread (GET reply-drafts), read when the reply confirm opens.
+  replyDraft: (thread: number) => ReviewItemDto | undefined;
 };
 
 // docs/plans/review-v2/spec.md section 2.1: a thread that a posted finding started. label and open: the More item that opens the talk

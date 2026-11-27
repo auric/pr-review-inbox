@@ -10,14 +10,15 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
-import type { CommentDto, PostDto } from "../../shared/dto";
+import type { CommentDto, PostDto, ReviewItemDto } from "../../shared/dto";
 import { commentUrl } from "../../shared/links";
 import { restoreDraft } from "../pr/ReplyComposer";
 import { ForgeLink, Text } from "../pr/Thread";
 import { snippet } from "../pr/threads";
+import { replyKey, sendItem } from "../review/data";
 import type { Hints } from "../shell/Hint";
 import { failText } from "../shell/model";
-import { dropPost, planKey, postsKey, retryPost, retryResolve, usePosts } from "./data";
+import { dropPost, planKey, postsKey, replyDiscards, retryPost, retryResolve, usePosts } from "./data";
 import { destLabel, mergePosts, type PostView, postView, shownPosts, splitPosts } from "./model";
 
 const icon = "size-[15px] shrink-0";
@@ -39,6 +40,25 @@ export function useOutbox(pr: number, comments: CommentDto[], forge: string) {
   useEffect(() => {
     if (sig) void qc.invalidateQueries({ queryKey: ["run"] });
   }, [sig, qc]);
+  // A failed post can still confirm after Retry, so its draft waits. Drop forgets it. The discard sends the current revision of
+  // the draft. A draft that left the open states stays.
+  useEffect(() => {
+    for (const p of data ?? []) {
+      const item = replyDiscards.get(p.id);
+      if (item === undefined || p.state !== "confirmed") continue;
+      replyDiscards.delete(p.id);
+      const it = qc.getQueryData<ReviewItemDto[]>(replyKey(pr))?.find((x) => x.id === item);
+      if (!it || (it.status !== "new" && it.status !== "accepted")) continue;
+      void sendItem(it.id, { action: "discard", revision: it.revision })
+        .catch(() => null)
+        .then((r) => {
+          void qc.invalidateQueries({ queryKey: replyKey(pr) });
+          void qc.invalidateQueries({ queryKey: planKey(pr) });
+          void qc.invalidateQueries({ queryKey: ["run"] });
+          if (!r || "conflict" in r) toast.add({ title: "Claude's draft reply stays. It changed, or the discard failed." });
+        });
+    }
+  }, [data, qc, pr]);
 
   const roots = useRef(comments);
   roots.current = comments;
@@ -73,6 +93,7 @@ export function useOutbox(pr: number, comments: CommentDto[], forge: string) {
       async drop(p, general) {
         try {
           await dropPost(p.id, general);
+          replyDiscards.delete(p.id);
           qc.setQueryData<PostDto[]>(postsKey(pr), (old) => old?.filter((x) => x.id !== p.id));
           if (p.destination.kind === "reply" && p.run === null) {
             const parent = roots.current.find((c) => p.destination.kind === "reply" && c.id === p.destination.parentId);

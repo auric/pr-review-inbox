@@ -599,3 +599,70 @@ test("the outcome line follows the reply and the fix; a Not valid reply next to 
   await expect(box).toBeChecked();
   expect(await writes()).toEqual([]);
 });
+
+// The user's own reply in a thread with an AI reply draft. The draft goes out of date with the post.
+const staleBadge = (page: Page) => row(page).locator("[data-stale-drafts]");
+async function ownReplyOverDraft(page: Page, text: string, drop: boolean) {
+  await connect(page);
+  await control("state", { reply: "new" });
+  await repliesButton(page).click();
+  await expect(card(page, ROOT)).toContainText(echo(1000010), { timeout: RUN_MS });
+  await thread(page, ROOT).getByRole("button", { name: "Write a reply" }).click();
+  const reply = thread(page, ROOT).getByRole("textbox", { name: /^Reply to / });
+  await reply.fill(text);
+  await reply.press("Control+Enter");
+  const box = thread(page, ROOT).getByRole("dialog");
+  await expect(postButton(box)).toBeFocused();
+  const drafted = box.getByRole("checkbox", { name: "Also discard Claude's draft reply in this thread" });
+  await expect(drafted).toBeChecked();
+  // The keyboard reaches the box: Shift+Tab from Post goes back to it, and Space toggles it.
+  if (!drop) {
+    await page.keyboard.press("Shift+Tab");
+    await expect(drafted).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(drafted).not.toBeChecked();
+  }
+  await postButton(box).click();
+  return box;
+}
+
+test("an own reply over an AI reply draft: the box discards the draft after the post, and the stale badge does not count it", async ({
+  page,
+}) => {
+  const text = "I changed the flush order myself.";
+  await ownReplyOverDraft(page, text, true);
+  await expect(thread(page, ROOT).locator("[data-post]")).toContainText("Posted.");
+  await expect(card(page, ROOT)).toContainText("Discarded reply draft");
+  expect(await posts()).toMatchObject([{ text, parent: { id: 1000010 } }]);
+  // The sync stores the own reply, so the thread waits on others. The discarded draft is not out of date.
+  await control("state", {});
+  await expect(thread(page, ROOT)).toHaveAttribute("aria-label", /^Waiting/);
+  await expect(card(page, ROOT)).toContainText("Discarded reply draft");
+  await expect(staleBadge(page)).toHaveCount(0);
+});
+
+test("an own reply over an AI reply draft: an unticked box keeps the draft, and the stale badge counts it", async ({ page }) => {
+  const text = "I changed the flush order myself.";
+  await ownReplyOverDraft(page, text, false);
+  await expect(thread(page, ROOT).locator("[data-post]")).toContainText("Posted.");
+  await control("state", {});
+  await expect(thread(page, ROOT)).toHaveAttribute("aria-label", /^Waiting/);
+  await expect(card(page, ROOT)).toContainText("New messages since this draft.");
+  await expect(card(page, ROOT)).toContainText(echo(1000010));
+  await expect(staleBadge(page)).toHaveText("1 reply draft out of date");
+});
+
+test("an own reply over an AI reply draft: a failed post discards nothing; a Retry that posts discards the draft", async ({ page }) => {
+  const text = "I changed the flush order myself.";
+  await posts({ fail: 400 });
+  await ownReplyOverDraft(page, text, true);
+  const post = thread(page, ROOT).locator("[data-post]");
+  await expect(post).toContainText("Failed.");
+  await expect(card(page, ROOT)).toContainText(echo(1000010));
+  await expect(card(page, ROOT)).not.toContainText("Discarded reply draft");
+  expect(await posts()).toEqual([]);
+  await post.getByRole("button", { name: "Retry" }).click();
+  await expect(post).toContainText("Posted.");
+  await expect(card(page, ROOT)).toContainText("Discarded reply draft");
+  expect(await posts()).toMatchObject([{ text, parent: { id: 1000010 } }]);
+});

@@ -153,6 +153,7 @@ async function setup(mark = false) {
     posts,
     fake,
     sync,
+    settings,
     db,
     pr,
     call,
@@ -375,6 +376,32 @@ describe("reply posts", () => {
     expect(s.sent()).toBe(1);
   });
 
+  test("A9: a check that cannot list the comments leaves the post unknown, logs the error, and sends no second POST", async () => {
+    const s = await setup();
+    s.posts.drop = true;
+    const real = await s.settings.provider();
+    if (!real) throw new Error("no provider");
+    spyOn(s.settings, "provider").mockImplementation(async () => ({
+      ...real,
+      listComments: async () => {
+        throw new Error("Malformed page.");
+      },
+    }));
+    const logs: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation((...a: unknown[]) => void logs.push(a.join(" ")));
+    cleanup.push(() => spy.mockRestore());
+    const { body } = await s.reply();
+    await s.settle();
+    expect((await s.list())[0]).toMatchObject({
+      state: "unknown",
+      checking: false,
+      attempts: 1,
+      lastError: "Could not read the comments on Bitbucket (internal error).",
+    });
+    expect(logs.some((l) => l.includes(`Post ${body.id} check: Malformed page.`))).toBe(true);
+    expect(s.sent()).toBe(1);
+  });
+
   test("no match leaves unknown; post again sends once more; other authors, texts, and parents never match", async () => {
     const s = await setup();
     // Decoys: the same text by another user under the parent, and my text under another parent.
@@ -541,6 +568,20 @@ describe("confirm", () => {
     // The anchor stays on the reviewed commits.
     expect(s.posts.bodies[0]?.anchor).toMatchObject({ fromHash: TARGET, toHash: SOURCE });
     expect(s.sent()).toBe(1);
+  });
+
+  test("a confirm that cannot read the pull request gives 502 and sends nothing", async () => {
+    const s = await setup();
+    const { item } = seedRun(s);
+    const id = item("Inline text.", 3);
+    await accept(s, id);
+    const items = itemsOf(await s.plan());
+    s.fake.routes[key("GET", PR_PATH)] = refuse(503);
+    const r = await s.call<{ error: string }>(`/api/prs/${s.pr}/confirm`, { items });
+    expect([r.status, r.body.error]).toEqual([502, "Could not read the pull request on Bitbucket (HTTP 503)."]);
+    expect(await s.list()).toEqual([]);
+    expect(itemRow(s, id).status).toBe("accepted");
+    expect(s.sent()).toBe(0);
   });
 
   test("D14: a reply item ignores a new source head; an inline item in the same confirm still gets the head error", async () => {
@@ -1041,6 +1082,19 @@ describe("resolve after posting", () => {
     expect(s.sent()).toBe(0);
   });
 
+  test("a manual resolve that cannot read the thread gives 502 and changes nothing", async () => {
+    const s = await setup();
+    s.fake.routes[key("GET", `${PR_PATH}/comments/*`)] = refuse(503);
+    const r = await s.call<ThreadResolveError>(`/api/prs/${s.pr}/resolve`, { thread: ROOT, resolved: true, seen: THEIRS });
+    expect([r.status, r.body.error]).toEqual([
+      502,
+      "No clear answer from Bitbucket (HTTP 503). Try again: the app reads the thread first.",
+    ]);
+    expect(s.posts.puts).toEqual([]);
+    expect(root(s).thread_resolved).toBe(0);
+    expect(await s.list()).toEqual([]);
+  });
+
   // Data Center 9.x gate (integration-check.md U62 to U65): a resolve and a reopen keep the version and the text.
   test("version unchanged after resolve and reopen; text and read state unchanged", async () => {
     const s = await setup();
@@ -1230,6 +1284,23 @@ describe("a reply in a resolved thread", () => {
     await t.settle();
     expect((await t.list())[0]).toMatchObject({ state: "confirmed", remoteId: FIRST_ID });
     expect(writes(t)).toEqual([PUT, COMMENTS]);
+  });
+
+  test("a reopen that cannot read the thread state fails the post, and the reply is not sent", async () => {
+    const s = await setup();
+    await resolveOnForge(s);
+    // The parent check reads the parent. The reopen reads the root, and that read fails.
+    const route = key("GET", `${PR_PATH}/comments/*`);
+    const read = s.posts.routes[route] as (req: Request) => Reply;
+    s.fake.routes[route] = (req) => (req.url.endsWith(`/comments/${ROOT}`) ? refuse(503) : read(req));
+    expect((await s.reply()).status).toBe(202);
+    await s.settle();
+    expect((await s.list())[0]).toMatchObject({
+      state: "failed",
+      lastError: "Could not read the thread state on Bitbucket (HTTP 503). The reply was not sent.",
+    });
+    expect(writes(s)).toEqual([]);
+    expect(s.posts.bodies).toEqual([]);
   });
 
   test("Post again of a reply run post checks no heads", async () => {

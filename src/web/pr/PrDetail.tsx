@@ -21,7 +21,7 @@ import {
 } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/toast";
-import type { CommentDto, PrRow } from "../../shared/dto";
+import type { CommentDto, PrRow, ReviewItemDto } from "../../shared/dto";
 import { archived } from "../../shared/views";
 import { AskPanel } from "../ask/AskPanel";
 import { useAsks } from "../ask/data";
@@ -276,6 +276,7 @@ export function PrDetail({
     copy: async () => null,
   });
   const logRef = useRef((_: number) => {});
+  const repliesRef = useRef<ReadonlyMap<number, ReviewItemDto>>(new Map());
   // Opens threads without a focus change. A thread that the "Need me" filter hides turns the filter off.
   const show = useCallback((ids: number[]) => {
     const hidden = latest.current.some((t) => ids.includes(t.id) && !passes(t, true));
@@ -326,6 +327,7 @@ export function PrDetail({
         return out;
       },
       onLog: (run) => logRef.current(run),
+      replyDraft: (tid) => repliesRef.current.get(tid),
     }),
     [row.id, hints, now, forge, web, runner, mine, ackRef, focusAfter, jump, announce, onReply, outbox.ctx, role, qc],
   );
@@ -349,6 +351,7 @@ export function PrDetail({
   draftReply.current = review.api.draftReply;
   fixRef.current = { open: review.api.fix, copy: review.fix.copyPrompt };
   logRef.current = review.api.openRunLog;
+  repliesRef.current = review.diff.replies;
   // One slot: a brief that opens closes Ask.
   const briefOpen = review.api.layer(null) === "brief";
   if (briefOpen && askOpen) setAskOpen(false);

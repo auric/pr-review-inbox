@@ -9,10 +9,11 @@ import { type KeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useRef,
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
-import { MAX_NOTE, type PostDto } from "../../shared/dto";
+import { MAX_NOTE, type PostDto, type ReviewItemDto } from "../../shared/dto";
 import { Confirm } from "../publish/Confirm";
-import { postReply, postsKey } from "../publish/data";
+import { postReply, postsKey, replyDiscards } from "../publish/data";
 import { draftKey, editDraft, mergePosts, parseDraft, placeOf, type ReplyDraft, replyText } from "../publish/model";
+import { aiReplyDraft } from "../review/model";
 import { Text, type ThreadCtx } from "./Thread";
 import type { Node, ThreadModel } from "./threads";
 
@@ -48,7 +49,24 @@ export function restoreDraft(pr: number, thread: number, text: string): boolean 
 
 const nameOf = (m: Node) => (m.who.me ? "your message" : m.who.name);
 
-type Pending = { parent: Node; seen: number; text: string };
+// draft: the AI reply draft of the thread that this post puts out of date, else null. drop: discard it after the post is confirmed.
+type Pending = { parent: Node; seen: number; text: string; draft: ReviewItemDto | null; drop: boolean };
+
+// The reply confirm choice for the AI reply draft that the post puts out of date.
+export function DropDraftBox(p: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label data-drop-draft className="flex items-center gap-2 text-sm">
+      <input
+        type="checkbox"
+        className="m-0 accent-foreground"
+        checked={p.checked}
+        disabled={p.disabled}
+        onChange={(e) => p.onChange(e.target.checked)}
+      />
+      Also discard Claude's draft reply in this thread
+    </label>
+  );
+}
 
 // aside: more actions at the end of the composer row, such as Draft reply (WP18).
 export function ReplyComposer({
@@ -124,7 +142,7 @@ export function ReplyComposer({
     }
     setNotice(null);
     // seen: the newest live message on screen now. Messages that arrive after this give 409 (WP13a).
-    setConfirm({ parent, seen: last.id, text });
+    setConfirm({ parent, seen: last.id, text, draft: aiReplyDraft(ctx.replyDraft(t.id), last.id), drop: true });
   };
 
   const closeConfirm = () => {
@@ -154,6 +172,7 @@ export function ReplyComposer({
         setPreview(false);
         return;
       }
+      if (confirm.draft && confirm.drop) replyDiscards.set(r.post.id, confirm.draft.id);
       qc.setQueryData<PostDto[]>(postsKey(ctx.pr), (old) => mergePosts(old, [r.post]));
       const next = fresh();
       setD(next);
@@ -291,6 +310,11 @@ export function ReplyComposer({
           canPost
           onPost={() => void send()}
           onCancel={closeConfirm}
+          extra={
+            confirm.draft && (
+              <DropDraftBox checked={confirm.drop} disabled={posting} onChange={(drop) => setConfirm((c) => c && { ...c, drop })} />
+            )
+          }
           className="mt-2.5 rounded-lg border border-rule-strong bg-pane px-3.5 pt-3 pb-3"
         />
       ) : (

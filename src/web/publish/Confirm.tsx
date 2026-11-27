@@ -46,6 +46,8 @@ export function Confirm(props: {
   off?: string;
   onPost: () => void;
   onCancel: () => void;
+  // A choice that goes with the post, above the buttons.
+  extra?: ReactNode;
   className?: string;
 }) {
   const post = useRef<HTMLButtonElement>(null);
@@ -163,6 +165,7 @@ export function Confirm(props: {
           ))}
         </div>
       )}
+      {props.extra}
       {props.error && (
         <p role="alert" className="m-0 flex items-start gap-1.5 text-sm text-destructive">
           <CircleAlert aria-hidden className="mt-0.5 size-[15px] shrink-0" />

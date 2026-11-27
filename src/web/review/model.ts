@@ -997,6 +997,14 @@ export function replyCard(it: ReviewItemDto | undefined, newest: number | null, 
   return it.status === "discarded" ? { kind: "discarded", it } : { kind: "draft", it, stale };
 }
 
+// The AI reply draft that the user's own reply in the thread puts out of date. null: no such draft, an out-of-date draft, or a draft that
+// the user wrote. A draft stored before origin existed is an AI draft.
+export function aiReplyDraft(it: ReviewItemDto | undefined, newest: number): ReviewItemDto | null {
+  const card = replyCard(it, newest, false);
+  if (card?.kind !== "draft" || card.stale || replyOf(card.it).origin === "user") return null;
+  return card.it.status === "new" || card.it.status === "accepted" ? card.it : null;
+}
+
 // The Draft replies button (plan pr-view-v4 2.2). turns: the turn of each thread of the PR. your: the threads where it is your turn.
 // need: the count on the button, the threads whose outcome needs a reply (outcome.ts needsReply). The run still takes every
 // your-turn thread. why: the popover text when a click starts no run, null when it starts one. D12: the server refuses more than

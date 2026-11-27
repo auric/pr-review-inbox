@@ -38,6 +38,10 @@ export async function confirmPosts(pr: number, items: { id: number; revision: nu
 
 export type ReplyResult = { post: PostDto } | { conflict: ReplyConflict };
 
+// The AI reply drafts to discard once the user's own reply post is confirmed: item ID by post ID (Outbox.tsx useOutbox). Memory only,
+// so a reload keeps the draft.
+export const replyDiscards = new Map<number, number>();
+
 // 409 with `newest`: new messages arrived after the page showed the thread. Any other 409 is an error.
 export async function postReply(pr: number, input: ReplyPostInput): Promise<ReplyResult> {
   const res = await api.api.prs[":id"].replies.$post({ ...param(pr), json: input });
