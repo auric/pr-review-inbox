@@ -344,7 +344,7 @@ describe("the plan check run (spec.md section 6.22.5)", () => {
       h.scenario({ bySchema: { spec: { delayMs: 1500 } } });
       const id = await h.answered();
       const asked = h.needsYou(id);
-      await until(() => h.runs(id).some((r) => r.kind === "spec" && r.status === "running" && r.source_head !== null));
+      await until(() => h.runs(id).some((r) => r.kind === "spec" && r.status === "running" && !!r.source_head));
       const moved = await commitOnMain(h.remote.remote, h.root, { "later.txt": "later\n" });
       await h.settle();
       const t = await h.get(id);
