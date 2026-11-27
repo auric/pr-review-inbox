@@ -12,6 +12,7 @@
 - Posts: a posted comment in "Posts to Bitbucket" now shows as plain text. Before, it showed Markdown marks such as **Blocker:**.
 - Tasks: a task link opened on a narrow screen now shows the task. Before, it showed the Tasks list and the address lost the task.
 - Review profiles: "Improve prompt" now writes prompts in the style that Anthropic recommends for Opus 5.5. It uses calm wording, gives the reason for a rule, and keeps the finder broad, because a separate check step filters the findings.
+- Settings: a new Bitbucket token for the same server and user no longer cancels running reviews and task steps. A new server URL or another user still cancels them.
 - Build a Jira task: the questions screen has "Copy as Markdown" and "Save .md". They give you the open questions with their options, so you can answer them in your own Claude Code session first.
 - My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."
 - Inbox: the "1 updated · re-sort" chip no longer stays for a pull request that you opened from a link outside the view. Before, a click on the chip did not clear it.

@@ -58,7 +58,8 @@ import {
   writeTasks,
 } from "./tasks/rules";
 
-export type SettingsState = { config: Config; db: Database };
+// accountChanged: the save changed the base URL or the signed-in user. A new origin also changes the database.
+export type SettingsState = { config: Config; db: Database; accountChanged: boolean };
 
 // config: the settings that produced the plan. A plan of replaced settings is stale.
 export type TaskPlan = { config: Config; hash: string; tasks: PrTask[] };
@@ -480,7 +481,8 @@ export function createSettings(
           const oldDb = sameOrigin ? null : db;
           config = next;
           if (oldDb) db = null;
-          const state = { config: next, db: currentDb() as Database };
+          const accountChanged = prev?.baseUrl !== baseUrl || prev.userSlug !== userSlug;
+          const state = { config: next, db: currentDb() as Database, accountChanged };
           log(`Settings saved for ${originOf(baseUrl)} as ${userSlug}.`);
           for (const fn of listeners) fn(state);
           oldDb?.close();
@@ -600,6 +602,7 @@ export function createSettings(
       return j && token ? createJenkinsClient({ baseUrl: j.baseUrl, user: j.user, token, caFile: j.caFile }) : null;
     },
     // Runs after a successful PUT that changes baseUrl, token, or caFile, after the new config is written and its database is open.
+    // A new token for the same base URL and user gives accountChanged false.
     onSettingsChanged(fn: (s: SettingsState) => void) {
       listeners.push(fn);
     },

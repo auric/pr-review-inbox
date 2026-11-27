@@ -383,7 +383,7 @@ async function setup(
   };
   const calls = (): Call[] => readRecords(record);
   const runCall = () => calls().find((c) => c.argv.includes("-p"));
-  return { root, dir, repo, fake, db, pr, app, review, sent, scenario, call, json, brief, start, finish, calls, runCall };
+  return { root, dir, repo, fake, db, pr, app, review, settings, sent, scenario, call, json, brief, start, finish, calls, runCall };
 }
 
 const flag = (argv: string[], name: string) => argv[argv.indexOf(name) + 1];
@@ -860,6 +860,74 @@ describe("start and failures", () => {
         expect(d.run.finishedAt).not.toBeNull();
       }
       expect((await h.json<MetaDto>("/api/meta")).body.runner.check).toEqual({ ok: true, version: "2.1.302" });
+    },
+    SLOW,
+  );
+
+  test(
+    "a failed restart recovery runs again at the next use, and the PR can start a new run",
+    async () => {
+      const h = await setup();
+      const { id } = h.db
+        .query(
+          `INSERT INTO review_run (pr, profile, note, idem_key, source_head, target_head, status, started_at)
+          VALUES ($pr, 'general', '', 'k1', 'a', 'b', 'running', 1) RETURNING id`,
+        )
+        .get({ pr: h.pr }) as { id: number };
+      h.db.run("CREATE TEMP TRIGGER no_recover BEFORE UPDATE ON review_run BEGIN SELECT RAISE(ABORT, 'recovery fails once'); END");
+      await h.review.start();
+      expect((h.db.query("SELECT status FROM review_run WHERE id = $id").get({ id }) as { status: string }).status).toBe("running");
+      h.db.run("DROP TRIGGER no_recover");
+
+      expect((await h.json<RunDetail>(`/api/runs/${id}`)).body.run).toMatchObject({ status: "failed", errorKind: "restart" });
+      await h.brief(NOTE, "general");
+      const started = await h.start();
+      expect(started.status).toBe(202);
+      expect((await h.finish(started.body.id)).run.status).toBe("completed");
+    },
+    SLOW,
+  );
+
+  test(
+    "a new token of the same server and user keeps a running run; a new user cancels it",
+    async () => {
+      const h = await setup();
+      h.scenario({ fixture: subagentRun(), hang: true });
+      const { body } = await h.start();
+      expect(await waitFor(() => h.runCall() !== undefined)).toBe(true);
+      const status = async () => (await h.json<RunDetail>(`/api/runs/${body.id}`)).body.run.status;
+
+      h.fake.routes[key("GET", "/rest/api/1.0/dashboard/pull-requests")] = { status: 200, body: {} };
+      h.fake.token = "rotated-token";
+      expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, token: "rotated-token" } })).status).toBe(200);
+      await Bun.sleep(300);
+      expect(await status()).toBe("running");
+      expect(h.sent.some((e) => e.event === "reset")).toBe(false);
+
+      h.fake.user = "other.user";
+      expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, token: "rotated-token" } })).status).toBe(200);
+      expect(h.sent.some((e) => e.event === "reset")).toBe(true);
+      expect((await h.finish(body.id)).run.status).toBe("cancelled");
+    },
+    SLOW,
+  );
+
+  test(
+    "a new Bitbucket server cancels a running run",
+    async () => {
+      const h = await setup();
+      const other = startFakeBitbucket({ routes: { [key("GET", "/rest/api/1.0/dashboard/pull-requests")]: { status: 200, body: {} } } });
+      cleanup.push(() => other.stop());
+      h.scenario({ fixture: subagentRun(), hang: true });
+      await h.start();
+      expect(await waitFor(() => h.runCall() !== undefined)).toBe(true);
+      const pid = (h.runCall() as Call).childPid;
+
+      expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: other.url, token: FAKE_TOKEN } })).status).toBe(200);
+      expect(h.sent.some((e) => e.event === "reset")).toBe(true);
+      cleanup.push(() => h.settings.close());
+      await h.review.wait();
+      if (pid !== undefined) expect(await waitFor(() => !alive(pid), 10_000)).toBe(true);
     },
     SLOW,
   );

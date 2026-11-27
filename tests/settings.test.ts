@@ -102,6 +102,20 @@ describe("settings API", () => {
     expect(existsSync(dir)).toBe(false);
   });
 
+  test("accountChanged: a new token of the same server and user is false; a new user or base URL is true", async () => {
+    const s = setup();
+    const changed: boolean[] = [];
+    s.settings.onSettingsChanged((st) => changed.push(st.accountChanged));
+    expect((await s.put({ baseUrl: fake.url, token: FAKE_TOKEN })).status).toBe(200);
+    fake.token = "rotated-token";
+    expect((await s.put({ baseUrl: fake.url, token: "rotated-token" })).status).toBe(200);
+    fake.user = "other.user";
+    expect((await s.put({ baseUrl: fake.url, token: "rotated-token" })).status).toBe(200);
+    fake.routes[key("GET", `/context${DASHBOARD_PATH}`)] = fixture("dashboard-pull-requests-page.json");
+    expect((await s.put({ baseUrl: `${fake.url}/context`, token: "rotated-token" })).status).toBe(200);
+    expect(changed).toEqual([true, false, true, true]);
+  });
+
   test("valid PUT against the fake server stores the settings", async () => {
     const s = setup();
     const changed: string[] = [];

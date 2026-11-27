@@ -533,12 +533,13 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   function open(): Database | null {
     const db = settings.db();
     if (db && !recovered.has(db)) {
-      recovered.add(db);
       db.transaction(() => {
         // recoverTasks finds the tasks by their running runs, so it runs first.
         recoverTasks(db, now(), dataDir);
         db.query(SQL.recover).run({ text: "The app stopped during the run.", now: now() });
       })();
+      // A failed recovery runs again at the next open.
+      recovered.add(db);
     }
     return db;
   }
@@ -2401,8 +2402,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return n > 0;
   }
 
-  // A settings change closes the database of the runs. A new origin opens another database, so no "changed" covers what each tab shows.
-  settings.onSettingsChanged(() => {
+  // A new base URL or user cancels every run. A new origin also closes the database of the runs, so no "changed" covers what each tab
+  // shows. A new token of the same account keeps the runs: each later Bitbucket call reads the token again. A git fetch that started
+  // before the save keeps the old token, so it can fail with an auth error.
+  settings.onSettingsChanged((s) => {
+    if (!s.accountChanged) return;
     cancelWhere(() => true);
     live.broadcast("reset", {});
   });
@@ -2701,7 +2705,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     remote,
     // At start: restart recovery, the prune of leftover workspaces, and the runner check.
     async start() {
-      open();
+      try {
+        open();
+      } catch (e) {
+        log(`Restart recovery failed: ${(e as Error).message}`);
+      }
       await prune();
       await check().catch((e) => log(`Runner check failed: ${(e as Error).message}`));
     },
