@@ -159,3 +159,14 @@ Both fixes change default prompt text. The repo rule says: "Every prompt change 
 - Whether `--agent` replaces or adds to the default Claude Code system prompt.
 - The order in time between the blog and the live [55] and [O5] text.
 - Every cost estimate and every "Expected effect" is a guess.
+
+## 11. Improve prompt (2026-11-28)
+
+The user set the source order on 2026-11-27: [55] first, then [O5], then [BP] where the first two are silent. So the [BP] general principles count for this package, unlike section 5. buildImprovePrompt (src/server/review/improve.ts) now follows the guidance in its own text and in the rules for the new prompt.
+
+- Report everything, filter in a separate pass (R2, [O5]): a new rule tells the improver to keep the finder broad and to add no "only high-confidence", "be conservative", or "only merge blockers" line. The Profile section states the two steps: the finder gets the profile prompt, and a separate check step filters.
+- No thinking or re-check lines (T1 [Blog], V1 [O5]): a new rule forbids them in the new prompt.
+- Calm wording ([BP] tool-use section, stated for Opus 4.5 and 4.6): kept on the user's explicit request. No 5.5 source repeats it. The improver text has no capital-letter emphasis word.
+- Reason behind a rule ([BP] "Add context to improve performance"), what to do instead of what not to do ([BP] output-format section), and examples steer the output ([BP] general principles): one rule each.
+- Kept: ASD-STE100, the user's purpose and repository rules, the tool list, the length cap, the untrusted-data fences, and the output schema.
+- The improve prompt is not a review run prompt, so REVIEW_PROMPT_VERSION stays. Only its hash pin in tests/review/prompt.test.ts changed. No eval measured the effect.

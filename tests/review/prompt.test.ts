@@ -776,7 +776,7 @@ describe("review v3 prompt switches", () => {
       reply: "cd085ab743e2fe4908fcf1207db6cf3d061fdd5152161fc51ae9a9dfdea08de5",
       fix: "e3431b38c46d6e2c1d231c7604adca4463033a570580485c47f2d0f94ab4a799",
       discuss: "1f8484da378fa9c68d8c1738e16e719ca970d43657734853de5f879824c8422d",
-      improve: "fd460dfd08351728607a4ede6b5e26fee7a31e5f5368168ee5cceed37508ad44",
+      improve: "8b235d9ae1e8d6f7e461aa547a1b43ab65dc53df8082668593bbe71a1e2c0a4b",
     });
     expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
   });

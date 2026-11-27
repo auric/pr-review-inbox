@@ -83,7 +83,7 @@ describe("buildImprovePrompt", () => {
     expect(shared).toContain("learn and deepwiki tools");
     const sections = section(p, "Check sections");
     for (const id of MODULE_IDS) expect(sections).toContain(`\n- ${id}: ${MODULES[id].label}\n`);
-    expect(sections).toContain("Never repeat their checks in the new prompt.");
+    expect(sections).toContain("Leave their checks out of the new prompt.");
     expect(section(buildImprovePrompt({ ...INPUT, explain: true }), "Check sections")).toBe(
       "# Check sections\n\nExplain runs get no check sections.\n",
     );
@@ -120,7 +120,7 @@ describe("buildImprovePrompt", () => {
     );
     expect(rules).toContain("state what to check and when a problem is a finding");
     expect(rules).toContain("Ask for defects, not for style.");
-    expect(rules).toContain("Never repeat a shared rule, a check section, or a language check.");
+    expect(rules).toContain("Leave out each shared rule, check section, and language check.");
     expect(rules).toContain(`${MAX_NOTE.toLocaleString("en")} characters or fewer`);
     expect(rules).toContain(
       "Read, Grep, Glob, and the rl-git tools git_log, git_blame, git_show, and git_diff, and the learn and deepwiki",
@@ -141,6 +141,34 @@ describe("buildImprovePrompt", () => {
     expect(p).not.toContain("a summary, risks, and questions");
     for (const l of rubric({ volume: "balanced", verifier: DEFAULT_VERIFIER })) expect(p).not.toContain(l);
     expect(section(p, "Language checks")).toBe("# Language checks\n\nExplain runs get no language checklist.\n");
+    expect(section(p, "Rules")).not.toContain("Keep the finder broad.");
+  });
+
+  // docs/plans/review-v2/research/opus55-prompting.md section 11.
+  test("the rules follow the Opus 5.5 prompting guidance and tell the improver to keep the finder broad", () => {
+    const p = buildImprovePrompt(INPUT);
+    for (const line of [
+      "- Use calm, plain wording. Add no emphasis with capital letters",
+      "- State each instruction as what to do.",
+      "- Give the reason for a rule when the rule alone does not show it.",
+      "- Add no line that tells the model to think step by step or to check its answer again.",
+      "- Add an example only when it shows a case that the words cannot.",
+      "Keep each repository rule and each user instruction in the current prompt.",
+      "- Keep the finder broad. Add no line such as 'report only high-confidence findings', 'be conservative', or 'report only merge blockers'.",
+      "The check step removes the weak findings.",
+      "- When the current prompt or the goal asks for such a filter, keep it, because the user's instruction wins. In reasons, say that it can hide real bugs, because the check step already filters.",
+    ])
+      expect(p.split(line).length).toBe(2);
+    expect(section(p, "Rules")).toContain("- Keep the finder broad.");
+    expect(section(p, "Profile")).toContain(
+      "First the finder gets this prompt and reports every problem that it finds. Then a separate check step",
+    );
+    // The user data is empty, so every word of the text comes from the app.
+    for (const input of [INPUT, { ...INPUT, explain: true }, { ...INPUT, docs: false, languageChecks: false }]) {
+      const text = buildImprovePrompt({ ...input, name: "", note: "", prompt: "", goal: "" });
+      expect(text).not.toMatch(/\b(MUST|NEVER|ALWAYS|CRITICAL|IMPORTANT|DO NOT|DON'T|REQUIRED|ONLY)\b/);
+      expect(text).not.toMatch(/think (carefully|hard)/i);
+    }
   });
 });
 
