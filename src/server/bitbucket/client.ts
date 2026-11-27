@@ -4,6 +4,7 @@
 // HTTP client for Bitbucket Server. The only module that sends requests to the forge.
 import { readFileSync } from "node:fs";
 import type { z } from "zod";
+import { secureUrl } from "../../shared/links";
 import type { ForgeErrorInfo, ForgeErrorKind, ListResult } from "../../shared/types";
 import { page } from "./schemas";
 
@@ -11,7 +12,6 @@ const TIMEOUT_MS = 30_000;
 const MAX_IN_FLIGHT = 2;
 const PAGE_LIMIT = 50;
 const MAX_PAGES = 200;
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 // Messages hold only the kind, the status, the system error code, and the endpoint path. Never the token, headers, or response text.
 export class ForgeError extends Error implements ForgeErrorInfo {
@@ -52,7 +52,7 @@ function kindOf(status: number): ForgeErrorKind {
 export function createClient(opts: ClientOptions) {
   const url = new URL(opts.baseUrl);
   // The token must not travel in clear text. Plain http is for the loopback test server only.
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) {
+  if (!secureUrl(url)) {
     throw new Error("The Bitbucket URL must use https.");
   }
   const base = opts.baseUrl.replace(/\/+$/, "");

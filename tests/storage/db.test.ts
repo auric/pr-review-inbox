@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 55;
+const LATEST = 56;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -110,7 +110,7 @@ const R3_COLUMNS = {
   skills_json: null,
   consult_json: null,
 };
-// 030_review_v2.sql, 032_ask_parent.sql, 033_task.sql, and 058_run_related.sql.
+// 030_review_v2.sql, 032_ask_parent.sql, 033_task.sql, 058_run_related.sql, and 059_run_log_cleared.sql.
 const V2_COLUMNS = {
   prompt_version: null,
   item: null,
@@ -119,6 +119,7 @@ const V2_COLUMNS = {
   parent_run: null,
   task: null,
   related_json: null,
+  log_cleared_at: null,
 };
 const V2_NAMES = Object.keys(V2_COLUMNS);
 
@@ -828,6 +829,7 @@ const withParent = (d: object) =>
     parent_run: null,
     task: null,
     related_json: null,
+    log_cleared_at: null,
   }));
 
 const V30 = [
@@ -952,7 +954,7 @@ test("migration from a version-31 database keeps every row and adds parent_run w
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     const after = { ...dump(db), notes: db.query("SELECT * FROM pr_note").all(), fix: db.query("SELECT * FROM fix_edit").all() };
     expect(after as Record<string, unknown>).toEqual({ ...before, review_run: withParent(before) });
-    expect(columns(db, "review_run").slice(-3)).toEqual(["parent_run", "task", "related_json"]);
+    expect(columns(db, "review_run").slice(-4)).toEqual(["parent_run", "task", "related_json", "log_cleared_at"]);
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'review_run_parent'").all()).toEqual([{ name: "review_run_parent" }]);
 
     const ask = (id: number, parent: number | null) =>
@@ -1016,10 +1018,15 @@ test("migration from a version-32 database keeps every row and child row; task r
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
     expect((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(columns(db, "review_run")).toEqual([...oldColumns, "task", "related_json"]);
+    expect(columns(db, "review_run")).toEqual([...oldColumns, "task", "related_json", "log_cleared_at"]);
     expect({ ...dump(db), ...extra(db) } as Record<string, unknown>).toEqual({
       ...before,
-      review_run: (before.review_run as Record<string, unknown>[]).map((r) => ({ ...r, task: null, related_json: null })),
+      review_run: (before.review_run as Record<string, unknown>[]).map((r) => ({
+        ...r,
+        task: null,
+        related_json: null,
+        log_cleared_at: null,
+      })),
     });
     expect(
       (db.query("PRAGMA table_info(review_run)").all() as { name: string; notnull: number }[]).find((c) => c.name === "pr")?.notnull,
@@ -2011,7 +2018,7 @@ test("migration from a version-54 database keeps the run rows and adds related_j
   const db = openDb(path);
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
-    expect(db.query("SELECT * FROM review_run").all()).toEqual(before.map((r) => ({ ...r, related_json: null })));
+    expect(db.query("SELECT * FROM review_run").all()).toEqual(before.map((r) => ({ ...r, related_json: null, log_cleared_at: null })));
   } finally {
     db.close();
   }

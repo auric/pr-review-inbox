@@ -74,4 +74,59 @@ test("a closed PR without an open fix commit loses refs/rl/<PR ID>/; an open fix
   } finally {
     db.close();
   }
-});
+  // Each test spawns git about 20 times. A loaded Windows host takes about 200 ms per spawn.
+}, 30_000);
+
+test("many closed PRs give one for-each-ref and one update-ref per repository; refs/rl/task/ and refs/rl/sub/ stay", async () => {
+  const dir = longPath(mkdtempSync(join(tmpdir(), "rl-prune-count-")));
+  dirs.push(dir);
+  const db = openDb(join(dir, "test.db"));
+  try {
+    const { env } = gitSetup(dir);
+    const id = {
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.invalid",
+    };
+    const repos = ["one", "two"];
+    const kept: Record<string, string[]> = {};
+    for (const repo of repos) {
+      const cache = cachePath(dir, { project: "PRJ", repo, id: 1 });
+      const g = async (args: string[], stdin?: string) =>
+        (await git([`--git-dir=${cache}`, ...args], { env: { ...env, ...id }, stdin })).trim();
+      await git(["init", "-q", "--bare", "--template=", cache], { env });
+      const commit = await g(["commit-tree", await g(["hash-object", "-t", "tree", "-w", "--stdin"], ""), "-m", "c"], "");
+      const lines: string[] = [];
+      // 40 closed PRs (1..40) and one open PR (41). The task and the submodule refs use the same numbers.
+      for (let n = 1; n <= 41; n++) {
+        db.query("INSERT INTO pull_request (project, repo, pr_id, state) VALUES ('PRJ', $repo, $n, $state)").run({
+          repo,
+          n,
+          state: n <= 40 ? "MERGED" : "OPEN",
+        });
+        lines.push(`create refs/rl/${n}/source ${commit}\n`);
+      }
+      lines.push(`create refs/rl/task/5/base ${commit}\n`, `create refs/rl/sub/5/head ${commit}\n`);
+      await g(["update-ref", "--stdin"], lines.join(""));
+      kept[repo] = ["refs/rl/41/source", "refs/rl/sub/5/head", "refs/rl/task/5/base"];
+    }
+
+    const calls: string[] = [];
+    await pruneRefs(db, dir, (args, opts) => {
+      calls.push(args.find((a) => !a.startsWith("-")) ?? "");
+      return git(args, opts);
+    });
+    expect(calls.sort()).toEqual(["for-each-ref", "for-each-ref", "update-ref", "update-ref"]);
+    for (const repo of repos) {
+      const cache = cachePath(dir, { project: "PRJ", repo, id: 1 });
+      const left = (await git([`--git-dir=${cache}`, "for-each-ref", "--format=%(refname)", "refs/rl/"], { env }))
+        .split("\n")
+        .filter(Boolean);
+      expect(left.sort()).toEqual(kept[repo] as string[]);
+    }
+  } finally {
+    db.close();
+  }
+  // Each test spawns git about 20 times. A loaded Windows host takes about 200 ms per spawn.
+}, 30_000);

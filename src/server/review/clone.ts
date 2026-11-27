@@ -137,17 +137,18 @@ function hookConfig(text: string): string | null {
   return JSON.stringify(HOOK_KEYS.map((k) => (Object.hasOwn(o, k) ? o[k] : null)));
 }
 
+// git() decodes stdout as text. That drops a BOM and hides invalid UTF-8, so the callers read the blob bytes here.
 export async function blobBytes(cache: string, env: Record<string, string>, sha: string): Promise<Uint8Array> {
   const p = Bun.spawn(["git", `--git-dir=${cache}`, "cat-file", "blob", sha], {
     env,
     stdin: "ignore",
     stdout: "pipe",
-    stderr: "ignore",
+    stderr: "pipe",
     timeout: CLONE_MS,
     killSignal: "SIGKILL",
   });
-  const [bytes, code] = await Promise.all([new Response(p.stdout).bytes(), p.exited]);
-  if (code !== 0) throw new GitError(`git cat-file failed (exit ${code ?? p.signalCode})`);
+  const [bytes, err, code] = await Promise.all([new Response(p.stdout).bytes(), new Response(p.stderr).text(), p.exited]);
+  if (code !== 0) throw new GitError(`git cat-file failed (exit ${code ?? p.signalCode}): ${err.trim().slice(-2000)}`);
   return bytes;
 }
 
@@ -287,9 +288,11 @@ const CLOSED_PRS = `SELECT p.project, p.repo, p.pr_id FROM pull_request p WHERE 
 
 // Deletes refs/rl/<PR ID>/* of each merged or declined PR without an open fix commit, so gc can drop the PR objects.
 // A reopened declined PR fetches its heads again at its next run.
-export async function pruneRefs(db: Database, dataDir: string) {
+// One for-each-ref per cache. run: the git runner, replaced in tests.
+export async function pruneRefs(db: Database, dataDir: string, run: typeof git = git) {
   const dir = longPath(dataDir);
   const { env } = gitSetup(dir);
+  const closed = new Map<string, Set<string>>();
   for (const p of db.query(CLOSED_PRS).all() as { project: string; repo: string; pr_id: number }[]) {
     let cache: string;
     try {
@@ -298,15 +301,17 @@ export async function pruneRefs(db: Database, dataDir: string) {
       continue;
     }
     if (!Number.isSafeInteger(p.pr_id) || !existsSync(join(cache, "HEAD"))) continue;
-    await locked(cache, async () => {
-      // git-for-each-ref(1): a pattern without a glob matches up to a slash, so refs/rl/5 never matches refs/rl/50.
-      const refs = (await git([`--git-dir=${cache}`, "for-each-ref", "--format=%(refname)", `refs/rl/${p.pr_id}`], { env }))
-        .split("\n")
-        .filter(Boolean);
-      if (refs.length)
-        await git([`--git-dir=${cache}`, "update-ref", "--stdin"], { env, stdin: refs.map((r) => `delete ${r}\n`).join("") });
-    });
+    closed.set(cache, (closed.get(cache) ?? new Set()).add(String(p.pr_id)));
   }
+  for (const [cache, ids] of closed)
+    await locked(cache, async () => {
+      // refs/rl/task/<id>/ and refs/rl/sub/ share the prefix. Only refs/rl/<PR ID>/ belongs to a PR.
+      const refs = (await run([`--git-dir=${cache}`, "for-each-ref", "--format=%(refname)", "refs/rl/"], { env }))
+        .split("\n")
+        .filter((r) => ids.has(/^refs\/rl\/(\d+)\//.exec(r)?.[1] ?? ""));
+      if (refs.length)
+        await run([`--git-dir=${cache}`, "update-ref", "--stdin"], { env, stdin: refs.map((r) => `delete ${r}\n`).join("") });
+    });
 }
 
 // "<mode> <sha>" of each index entry of the clone, per path.

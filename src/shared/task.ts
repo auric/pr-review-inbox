@@ -32,6 +32,8 @@ export const PART_STATES = [
   "abandoned",
 ] as const;
 export type PartState = (typeof PART_STATES)[number];
+// The part states with a built head. The loop, the PR opener, and the scheduler read this one set.
+export const BUILT_PARTS: ReadonlySet<PartState> = new Set<PartState>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
 
 export const STEP_STATES = ["waiting", "running", "ok", "failed", "cancelled", "skipped"] as const;
 export type StepState = (typeof STEP_STATES)[number];

@@ -11,6 +11,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { type McpPick, type McpServerDto, type McpToolDto, mcpServerId, mcpToolSafety } from "../../shared/dto";
+import { secureUrl } from "../../shared/links";
 import { DOC_SERVERS, GIT_SERVER } from "./catalog";
 import { childEnv, killTree, NAME, type UserMcpEntry, type UserServerSpec } from "./claude";
 import { claudeConfigDir, enabledPlugins, readJson } from "./skills";
@@ -20,7 +21,6 @@ const MAX_PAGES = 10;
 const MAX_DESCRIPTION = 500;
 // The app's own servers keep these names.
 const RESERVED = new Set([GIT_SERVER, ...Object.keys(DOC_SERVERS)]);
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 // Claude Code 2.1.x (getGlobalClaudeFile): <config home>/.config.json when it exists, else .claude.json in CLAUDE_CONFIG_DIR or the home folder.
 // configDir: CLAUDE_CONFIG_DIR. The child env of the CLI keeps it.
@@ -37,8 +37,7 @@ const strings = (v: unknown): Record<string, string> | null =>
 function remoteUrl(v: unknown): string | null {
   if (typeof v !== "string") return null;
   try {
-    const u = new URL(v);
-    return u.protocol === "https:" || (u.protocol === "http:" && LOOPBACK.has(u.hostname)) ? v : null;
+    return secureUrl(new URL(v)) ? v : null;
   } catch {
     return null;
   }

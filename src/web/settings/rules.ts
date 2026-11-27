@@ -3,6 +3,7 @@
 
 // Pure model of the task-rule editor (plan v3 WP3, prototype/v3 Settings). No DOM access, so bun test runs it.
 import type { TaskRule, TaskRuleDto, TaskSource } from "../../shared/dto";
+import { secureUrl } from "../../shared/links";
 
 // Limits of taskRuleInput and settingsInput in src/shared/dto.ts. tests/ui/rules.test.ts pins them. A value import of dto.ts would put zod into the page.
 export const LIMITS = { rules: 20, pattern: 200, keys: 50, key: 64 } as const;
@@ -102,7 +103,6 @@ export function ruleProblem(r: Draft): string | null {
   return null;
 }
 
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 export const LINK_TEXT = "The task link must be an https URL with {key}. Plain http works only on localhost or 127.0.0.1.";
 
 // The validTaskLink rule of src/server/tasks/rules.ts: https, or http on loopback, with {key} outside the origin and no credentials.
@@ -113,7 +113,7 @@ export function linkProblem(raw: string): string | null {
     const a = new URL(raw.replaceAll("{key}", "A"));
     const b = new URL(raw.replaceAll("{key}", "B"));
     if (a.origin !== b.origin || a.username || a.password) return LINK_TEXT;
-    if (a.protocol === "https:" || (a.protocol === "http:" && LOOPBACK.has(a.hostname))) return null;
+    if (secureUrl(a)) return null;
   } catch {}
   return LINK_TEXT;
 }

@@ -45,6 +45,7 @@ import {
   allowWarning,
   BASH_TIMEOUT_DEFAULT_SEC,
   BUILDS_AT_ONCE_DEFAULT,
+  BUILT_PARTS,
   branchName,
   byKind,
   INTERVIEW_QUESTIONS,
@@ -1157,7 +1158,6 @@ export const WORKING = "Claude or the checks are working.";
 // spec.md section 6.18.1: the reasons that keep the Tell Claude box. A part that the loop builds has a worktree; a built part waits.
 const BOX_REASONS = new Set<TaskBlocked["kind"]>(["red", "size", "blocker", "denied_path", "update"]);
 const HAS_WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
-const BUILT = new Set<PartState>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
 const parseBlocked = (json: string | null): TaskBlocked | null => {
   const r = json === null ? null : taskBlocked.safeParse(JSON.parse(json));
   return r?.success ? r.data : null;
@@ -1205,9 +1205,9 @@ export function currentPart(db: Database, t: TaskRow, partId?: number): PartRow 
 // builds; the first part that waits for review.
 function focusOf(db: Database, t: TaskRow, all: PartRow[]): PartRow | undefined {
   const mine = all.filter((p) => p.adopted === 0);
-  const lowerMerged = (p: PartRow) => BUILT.has(p.state) && lowerOf(db, t, p, all) !== null;
+  const lowerMerged = (p: PartRow) => BUILT_PARTS.has(p.state) && lowerOf(db, t, p, all) !== null;
   const behind = (p: PartRow) =>
-    BUILT.has(p.state) &&
+    BUILT_PARTS.has(p.state) &&
     ((p.pushed !== null && p.head !== p.pushed) || partBases(db, t, p).some((x) => x.newCommits > 0 || x.conflicted || x.changed));
   return (
     mine.find((p) => p.state === "self_reviewed") ??
@@ -1420,7 +1420,7 @@ export function instructTarget(db: Database, t: TaskRow, partId?: number): { par
   if (!part || !HAS_WORKTREE.has(part.state))
     return { error: partId === undefined ? TASK_STATE_TEXT[t.state] : "This part has no worktree." };
   // No reason and a part in the build: the loop works on it.
-  if (!b && !BUILT.has(part.state) && !live) return { error: WORKING };
+  if (!b && !BUILT_PARTS.has(part.state) && !live) return { error: WORKING };
   return { part };
 }
 
@@ -1432,7 +1432,7 @@ export function updateTarget(db: Database, t: TaskRow, partId: number): { part: 
   if (b && b.kind !== "update") return { error: b.text };
   if (db.query(Q.busy).get({ id: t.id })) return { error: WORKING };
   const part = currentPart(db, t, partId);
-  if (!part || !BUILT.has(part.state)) return { error: "This part is not built yet." };
+  if (!part || !BUILT_PARTS.has(part.state)) return { error: "This part is not built yet." };
   return { part };
 }
 
@@ -1486,7 +1486,7 @@ function basesOf(db: Database, t: TaskRow): TaskDto["bases"] {
 
 // The bases of one built part that the app created (spec.md section 6.20.10, the base check of each part).
 export function partBases(db: Database, t: TaskRow, part: PartRow): TaskDto["bases"] {
-  if (!BUILT.has(part.state) || part.adopted === 1) return [];
+  if (!BUILT_PARTS.has(part.state) || part.adopted === 1) return [];
   const check = baseCheckOf(db, t.id);
   const conflicted = (pr: number | null) => {
     const r =

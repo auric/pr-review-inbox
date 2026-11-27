@@ -4,13 +4,13 @@
 // Jenkins client (part-session.md section 2.15, package C2). The only module that sends requests to Jenkins (BRIEF 3.6).
 // GET only. No redirect. No origin other than the configured one. The token never goes into a message, a log line, or a URL.
 import { readFileSync } from "node:fs";
+import { secureUrl } from "../../shared/links";
 
 const TIMEOUT_MS = 30_000;
 // ci-builds.md Layer C: the app keeps at most the last 2 MB of a build log.
 export const MAX_LOG_BYTES = 2 * 1024 * 1024;
 // A larger whoAmI answer is an error of kind shape.
 const MAX_JSON_BYTES = 64 * 1024;
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 export type JenkinsErrorKind =
   | "auth"
@@ -45,7 +45,7 @@ export type BuildLog = { text: string; size: number; start: number };
 export function createJenkinsClient(opts: JenkinsOptions) {
   const base = new URL(opts.baseUrl);
   // The token must not travel in clear text. Plain http is for the loopback test server only.
-  if (base.protocol !== "https:" && !(base.protocol === "http:" && LOOPBACK.has(base.hostname))) {
+  if (!secureUrl(base)) {
     throw new Error("The CI server URL must use https.");
   }
   const basePath = `${base.pathname.replace(/\/+$/, "")}/`;

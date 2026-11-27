@@ -68,6 +68,7 @@ import {
 import { eventPhase, type RunErrorKind, type RunEvent, type RunStatus } from "../../shared/run-log";
 import { GIT_SERVER, type Lens, type Profile, passLabel } from "./catalog";
 import type { RunOutcome } from "./claude";
+import { blobBytes } from "./clone";
 import type { Candidate } from "./context-files";
 import { type DiffFile, parseDiff } from "./diffmap";
 import { type FixFile, type ValidEdit, validateFix } from "./fix";
@@ -1665,23 +1666,6 @@ export const cancelledEnding = (o?: RunOutcome): Ending => ({
   raw: o ? rawOutput(o) : "Cancelled before the runner started.",
   outcome: o,
 });
-
-const BLOB_TIMEOUT_MS = 60_000;
-
-// git() decodes stdout as text. That drops a BOM and hides invalid UTF-8, so the edit rules read the blob bytes here.
-async function blobBytes(cache: string, env: Record<string, string>, object: string): Promise<Uint8Array> {
-  const p = Bun.spawn(["git", `--git-dir=${cache}`, "cat-file", "blob", object], {
-    env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: BLOB_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-  });
-  const [bytes, err, code] = await Promise.all([new Response(p.stdout).bytes(), new Response(p.stderr).text(), p.exited]);
-  if (code !== 0) throw new Error(`git cat-file failed (exit ${code ?? p.signalCode}): ${err.trim().slice(-2000)}`);
-  return bytes;
-}
 
 // The edit paths at the source head, read from the cache clone, never from the sanitized worktree.
 // The full tree listing needs no pathspec, so no path text can act as pathspec magic.

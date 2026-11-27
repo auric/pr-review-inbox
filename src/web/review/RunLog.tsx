@@ -218,7 +218,13 @@ export function RunLog(props: {
               ))}
             </Fragment>
           ))}
-          {!detail.events.length && <li className="py-1 font-sans text-sm text-muted-foreground">No tool call yet.</li>}
+          {!detail.events.length && (
+            <li className="py-1 font-sans text-sm text-muted-foreground">
+              {detail.run.logCleared
+                ? "The app cleared the tool calls and the raw output of this run, because the pull request is archived. The findings and drafts stay."
+                : "No tool call yet."}
+            </li>
+          )}
         </ol>
       ) : (
         <div role="status" aria-busy="true" aria-label="Loading the run log" className="grid content-start gap-2 p-4">

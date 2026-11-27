@@ -21,6 +21,8 @@ import { cachePath, diffArgs, type GitRemote, gitSetup, noUrl, syncCache, Worksp
 const MAX_DIFF_BYTES = 32 * 1024 * 1024;
 const MAX_LINE = 2000;
 const MEMO_SIZE = 4;
+// The parsed rows take more memory than the text, so the cap counts text characters.
+const MEMO_CHARS = 64 * 1024 * 1024;
 const TIMEOUT_MS = 10 * 60_000;
 const STDERR_TAIL = 2_000;
 // Plan r2 section 7: syncCache throws these texts when a server head differs from the pinned head.
@@ -48,8 +50,22 @@ function prOf(db: Database, id: number): Pr | DiffResult<never> {
   return { ref: { project: r.project, repo: r.repo, id: r.pr_id }, sourceHead: r.source_head, targetHead: r.target_head };
 }
 
-// Key: cache, merge base, source head. The newest entry is last. null: the diff text is over MAX_DIFF_BYTES.
-const memo = new Map<string, DiffFile[] | null>();
+// Key: cache, merge base, source head. The newest entry is last. files null: the diff text is over MAX_DIFF_BYTES.
+export type MemoEntry = { files: DiffFile[] | null; chars: number };
+const memo = new Map<string, MemoEntry>();
+
+// Adds the entry as the newest, then drops the oldest entries until the count and the total characters fit.
+export function remember(m: Map<string, MemoEntry>, key: string, entry: MemoEntry, size = MEMO_SIZE, chars = MEMO_CHARS) {
+  m.delete(key);
+  m.set(key, entry);
+  let total = 0;
+  for (const e of m.values()) total += e.chars;
+  for (const [k, e] of m) {
+    if (m.size <= size && total <= chars) break;
+    m.delete(k);
+    total -= e.chars;
+  }
+}
 
 // `git diff` with the validator arguments. Returns null when the output is over MAX_DIFF_BYTES.
 async function diffText(c: Cache, head: string): Promise<string | null> {
@@ -83,16 +99,14 @@ async function diffText(c: Cache, head: string): Promise<string | null> {
 
 async function filesOf(c: Cache, head: string): Promise<DiffFile[] | null> {
   const key = `${c.cache}\0${c.mergeBase}\0${head}`;
-  if (memo.has(key)) {
-    const hit = memo.get(key) as DiffFile[] | null;
-    memo.delete(key);
-    memo.set(key, hit);
-    return hit;
+  const hit = memo.get(key);
+  if (hit) {
+    remember(memo, key, hit);
+    return hit.files;
   }
   const text = await diffText(c, head);
   const files = text === null ? null : parseDiff(text);
-  memo.set(key, files);
-  for (const k of memo.keys()) if (memo.size > MEMO_SIZE) memo.delete(k);
+  remember(memo, key, { files, chars: text?.length ?? 0 });
   return files;
 }
 

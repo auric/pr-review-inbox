@@ -9,7 +9,7 @@
 // commits the gitlink of a merged submodule and pushes the parent, also only on its click.
 import type { Database } from "bun:sqlite";
 import type { TaskDiffDto } from "../../shared/dto";
-import { TASK_STATE_TEXT } from "../../shared/task";
+import { BUILT_PARTS, type PartState, TASK_STATE_TEXT } from "../../shared/task";
 import type { PullRequest } from "../../shared/types";
 import { ForgeError } from "../bitbucket/client";
 import { writeProblem } from "../bitbucket/errors";
@@ -58,10 +58,8 @@ const DIFF_MS = 60_000;
 // spec.md section 6.16.8, Links: the heading of the PR links at the end of each description.
 const RELATED = "Related PRs:";
 const BUSY = "Claude is still working on this task. Wait for the step to end.";
-// The part states with a built head (tasks.ts BUILT).
-const BUILT = new Set(["self_reviewed", "pr_open", "changes_requested", "approved"]);
 // spec.md section 6.20.10: a lower branch deleted at its merge declines the PR on top of it (Gate G5), and the move opens it again.
-const MOVABLE = new Set([...BUILT, "declined"]);
+const MOVABLE: ReadonlySet<string> = new Set([...BUILT_PARTS, "declined"]);
 
 type PartRow = {
   id: number;
@@ -441,7 +439,7 @@ export function createPrOpener(deps: OpenPrDeps) {
     if ("status" in t) return t;
     const part = db.query(Q.part).get({ part: partId, task: id }) as PartRow | null;
     if (!part) return { status: 404, error: "Part not found." };
-    if (!BUILT.has(part.state) || !part.head) return conflict(db, id, "This part is not ready for its PR.");
+    if (!BUILT_PARTS.has(part.state as PartState) || !part.head) return conflict(db, id, "This part is not ready for its PR.");
     if (!docsOf(t)) return conflict(db, id, "The task has no approved plan.");
     const moved = baseChanged(db, t, part) ?? movedFirst(db, t, part);
     if (moved) return conflict(db, id, moved);
@@ -753,7 +751,7 @@ export function createPrOpener(deps: OpenPrDeps) {
   }
 
   // The checks of the push and the move: the part, not a tracked PR, with a built head.
-  function partOf(db: Database, t: TaskRow, partId: number, states: Set<string>): PartRow | TaskResult {
+  function partOf(db: Database, t: TaskRow, partId: number, states: ReadonlySet<string>): PartRow | TaskResult {
     const part = db.query(Q.part).get({ part: partId, task: t.id }) as PartRow | null;
     if (!part) return { status: 404, error: "Part not found." };
     if (part.adopted === 1) return conflict(db, t.id, ADOPTED);
@@ -795,7 +793,7 @@ export function createPrOpener(deps: OpenPrDeps) {
   async function pushNow(db: Database, id: number, partId: number, input: { version: number }): Promise<TaskResult> {
     const t = ready(db, id, input.version);
     if ("status" in t) return t;
-    const part = partOf(db, t, partId, BUILT);
+    const part = partOf(db, t, partId, BUILT_PARTS);
     if ("status" in part) return part;
     const moved = movedFirst(db, t, part);
     if (moved) return conflict(db, id, moved);

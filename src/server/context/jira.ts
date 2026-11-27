@@ -14,6 +14,7 @@ import {
   type IssueSubtask,
   JIRA_KEY,
 } from "../../shared/dto";
+import { secureUrl } from "../../shared/links";
 import { COMPILED } from "../build";
 import { log } from "../log";
 import { fenced } from "./markdown";
@@ -49,7 +50,6 @@ export const MAX_HOPS = 3;
 const ATTACHMENT_PATH = "/secure/attachment";
 // Jira Cloud OpenAPI: redirect=false gives 200 with the bytes in place of a 303 to another host.
 const CLOUD_ATTACHMENT_PATH = "/rest/api/2/attachment/content";
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 // Deep nesting keeps the converter busy for minutes (1 MB of nested div: over 90 s).
 // A field budget starts when its worker is ready. The total budget starts when the first worker is ready.
 export const CONVERT_FIELD_MS = 3_000;
@@ -345,7 +345,7 @@ export class JiraDeploymentError extends Error {
 export function createJiraSource(opts: JiraOptions): ContextSource {
   const url = new URL(opts.baseUrl);
   // The token must not travel in clear text. Plain http is for the loopback test server only.
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) {
+  if (!secureUrl(url)) {
     throw new Error("The Jira URL must use https.");
   }
   const base = opts.baseUrl.replace(/\/+$/, "");

@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { serveStatic } from "hono/bun";
 import { type AppOptions, createApp } from "./app";
 import { BUILD_COMMIT } from "./build";
-import { sweep } from "./context/attachments";
+import { RETENTION_MS, sweep } from "./context/attachments";
 import { createLive } from "./live";
 import { log } from "./log";
 import { createOutbox } from "./publish/outbox";
@@ -15,6 +15,7 @@ import { pruneRefs } from "./review/clone";
 import { runCodegraphMcp } from "./review/codegraph-mcp";
 import { runGitMcp } from "./review/git-mcp";
 import { createReviewJobs } from "./review/jobs";
+import { clearRunLogs } from "./review/run-rows";
 import { createSettings } from "./settings";
 import { createSyncEngine } from "./sync/engine";
 
@@ -91,6 +92,11 @@ if (import.meta.main && codegraphMcpAt >= 0) {
     if (db) sweep(db, review.dataDir);
   } catch (e) {
     log(`Could not clean up the attachments folder: ${(e as Error).message}`);
+  }
+  try {
+    if (db) clearRunLogs(db, Date.now() - RETENTION_MS);
+  } catch (e) {
+    log(`Could not clear the run logs of archived pull requests: ${(e as Error).message}`);
   }
   if (db)
     void pruneRefs(db, review.dataDir).catch((e) => log(`Could not delete the refs of closed pull requests: ${(e as Error).message}`));

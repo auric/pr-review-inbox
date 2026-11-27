@@ -699,10 +699,30 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return proposeNotes(list, proposalContext(j.db, pr, settings.config()?.userSlug ?? null, j.peers ?? new Map()), now());
   }
 
+  // The SQL.end parameters that a PR run and a task run share. The callers add summary, fix, and explain.
+  function endParams(id: number, e: Ending, usage: RunUsage | null, flagged: string | null) {
+    const o = e.outcome;
+    return {
+      id,
+      status: e.status,
+      kind: e.kind,
+      text: e.text,
+      session: o?.init?.session_id ?? o?.result?.session_id ?? null,
+      cli: o?.init?.claude_code_version ?? null,
+      model: o?.init?.model ?? null,
+      // The init event names the model that ran. Its default effort replaces the one from the run start.
+      init_effort: !flagged && !!o?.init?.model,
+      effort_default: !flagged && o?.init?.model ? runEffort(o.init.model) : null,
+      usage: usage ? JSON.stringify(usage) : null,
+      answer: e.result?.answer ?? null,
+      raw: e.raw,
+      now: now(),
+    };
+  }
+
   // One transaction for the run, its log, and its items. Returns false when restart recovery ended the run first.
   function end(j: Job, e: Ending): boolean {
     const o = e.outcome;
-    const r = o?.result;
     const usage = e.usage !== undefined ? e.usage : o ? usageOf(o) : null;
     // A session run has no --effort flag.
     const flagged = j.session ? null : j.profile.effort;
@@ -719,23 +739,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const summary = e.result?.summary;
       const coverage = summary && notes.length ? { ...summary.coverage, skipped: [...summary.coverage.skipped, ...notes] } : null;
       const done = j.db.query(SQL.end).run({
-        id: j.id,
-        status: e.status,
-        kind: e.kind,
-        text: e.text,
-        session: o?.init?.session_id ?? r?.session_id ?? null,
-        cli: o?.init?.claude_code_version ?? null,
-        model: o?.init?.model ?? null,
-        // The init event names the model that ran. Its default effort replaces the one from the run start.
-        init_effort: !flagged && !!o?.init?.model,
-        effort_default: !flagged && o?.init?.model ? runEffort(o.init.model) : null,
-        usage: usage ? JSON.stringify(usage) : null,
+        ...endParams(j.id, e, usage, flagged),
         summary: summary ? JSON.stringify(coverage ? { ...summary, coverage } : summary) : null,
-        answer: e.result?.answer ?? null,
         fix: e.result?.fix ? JSON.stringify(e.result.fix.threads) : null,
         explain: e.result?.explain ? JSON.stringify(e.result.explain) : null,
-        raw: e.raw,
-        now: now(),
       });
       // Restart recovery can end the row first. Then no item goes in.
       if (!done.changes) return false;
@@ -2307,29 +2314,16 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
   // One transaction for the run, its log, and the finish of the task. Returns the effect of the finish.
   function endTask(j: TaskJob, e: Ending, head: string | null): (() => void) | undefined {
     const o = e.outcome;
-    const r = o?.result;
     const usage = e.usage !== undefined ? e.usage : o ? usageOf(o) : null;
     const flagged = j.profile.effort;
     const effect = j.db.transaction(() => {
       if (o) upsertEvents(j.db, j.id, o.events);
       const summary = e.result?.summary;
       const done = j.db.query(SQL.end).run({
-        id: j.id,
-        status: e.status,
-        kind: e.kind,
-        text: e.text,
-        session: o?.init?.session_id ?? r?.session_id ?? null,
-        cli: o?.init?.claude_code_version ?? null,
-        model: o?.init?.model ?? null,
-        init_effort: !flagged && !!o?.init?.model,
-        effort_default: !flagged && o?.init?.model ? runEffort(o.init.model) : null,
-        usage: usage ? JSON.stringify(usage) : null,
+        ...endParams(j.id, e, usage, flagged),
         summary: summary ? JSON.stringify(summary) : null,
-        answer: e.result?.answer ?? null,
         fix: null,
         explain: null,
-        raw: e.raw,
-        now: now(),
       });
       // Restart recovery can end the row first. Then the task stays as recoverTasks left it.
       if (!done.changes) return undefined;

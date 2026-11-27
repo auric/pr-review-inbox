@@ -3,7 +3,7 @@
 
 // The scheduler of the parts of a task (docs/plans/review-v2/spec.md section 6.20.6, design.md B29). It is a pure function and no XState
 // machine. The loop and the TaskDto both read it, so the loop and the UI never disagree.
-import type { PartState, StartMode } from "../../shared/task";
+import { BUILT_PARTS, type PartState, type StartMode } from "../../shared/task";
 
 // One part. label: its name in a sentence. after: the task_part ID of the lower part. gate: the part passed the part gate (spec.md
 // section 6.10). override: the user started it before colleagues approved its lower part. done: Jira says that each sub-task of the part
@@ -24,8 +24,6 @@ export type SchedulePart = {
 // each planned part that does not start.
 export type Schedule = { starts: { id: number; on: number | null }[]; waits: Map<number, string> };
 
-// The open count: built parts and PRs, tracked PRs included.
-const OPEN = new Set<PartState>(["self_reviewed", "pr_open", "changes_requested", "approved"]);
 // A part that builds on a lower part needs its pushed head, so the lower part has a PR.
 const HAS_PR = new Set<PartState>(["pr_open", "changes_requested", "approved"]);
 
@@ -46,7 +44,7 @@ function startOf(p: SchedulePart, parts: readonly SchedulePart[]): { on: number 
 export function nextPart(parts: readonly SchedulePart[], maxOpen: number, atOnce = 1): Schedule {
   const waits = new Map<number, string>();
   const busy = parts.filter((p) => p.state === "implementing");
-  const open = parts.filter((p) => OPEN.has(p.state)).length;
+  const open = parts.filter((p) => BUILT_PARTS.has(p.state)).length;
   const starts: Schedule["starts"] = [];
   for (const p of [...parts].sort((a, b) => a.ord - b.ord)) {
     if (p.state !== "planned") continue;

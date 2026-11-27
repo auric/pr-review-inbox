@@ -57,6 +57,7 @@ export type RunRow = {
   usage_json: string | null;
   summary_json: string | null;
   has_raw: number;
+  log_cleared_at: number | null;
   started_at: number;
   finished_at: number | null;
   pr_source: string | null;
@@ -170,7 +171,7 @@ export const SQL = {
   // docs/plans/review-v2/jira-context.md section 4.1: the fetched tasks after the reads at the run start (AC-JC11).
   setTasks: "UPDATE review_run SET tasks_json = $tasks WHERE id = $id",
   run: `SELECT r.id, r.pr, r.kind, r.profile, r.profile_name, r.explain, r.note, r.source_head, r.target_head, r.merge_base, r.fetch_via, r.status, r.error_kind, r.error_text,
-      r.session_id, r.cli_version, r.model, r.effort, r.effort_default, r.usage_json, r.summary_json, r.raw_output IS NOT NULL AS has_raw, r.started_at, r.finished_at,
+      r.session_id, r.cli_version, r.model, r.effort, r.effort_default, r.usage_json, r.summary_json, r.raw_output IS NOT NULL AS has_raw, r.log_cleared_at, r.started_at, r.finished_at,
       p.source_head AS pr_source, p.target_head AS pr_target, r.since_head, r.range_base, r.question, r.answer, r.fix_json, r.tasks_json, r.instructions_json, r.skills_json,
       r.consult_json, r.related_json, r.parent_run,
       ${OPEN_FINDINGS} AS findings
@@ -262,6 +263,19 @@ export const SQL = {
     VALUES ($pr, 'session', '', '', $key, $source, $target, 'running', $now, 'default', $consult) RETURNING id`,
   sessionAnswer: "SELECT answer, consult_json FROM review_run WHERE id = $run AND pr = $pr AND kind = 'session' AND answer IS NOT NULL",
 };
+
+// Audit S2: clears the raw output and the tool calls of the ended runs of PRs archived before `before`. The run row, its summary,
+// and its items stay, so the run list and Review quality still count the run.
+export function clearRunLogs(db: Database, before: number, now = Date.now()) {
+  const runs = `SELECT r.id FROM review_run r JOIN pull_request p ON p.id = r.pr
+    WHERE p.archived_at IS NOT NULL AND p.archived_at < $before AND r.status <> 'running' AND r.log_cleared_at IS NULL
+      AND (r.raw_output IS NOT NULL OR EXISTS (SELECT 1 FROM run_event e WHERE e.run = r.id))`;
+  db.transaction(() => {
+    db.query(`UPDATE review_run SET log_cleared_at = $now WHERE id IN (${runs})`).run({ before, now });
+    db.query("DELETE FROM run_event WHERE run IN (SELECT id FROM review_run WHERE log_cleared_at = $now)").run({ now });
+    db.query("UPDATE review_run SET raw_output = NULL WHERE log_cleared_at = $now").run({ now });
+  })();
+}
 
 export function toPullRequest(r: PrRow & { source_head: string; target_head: string }): PullRequest {
   const author = r.author_slug ?? "";
@@ -385,6 +399,7 @@ export function toRunDto(r: RunRow, resolve = effortsNow()): RunDto {
     finishedAt: r.finished_at,
     stale: source || target ? { source, target } : null,
     hasRaw: r.has_raw === 1,
+    ...(r.log_cleared_at !== null && { logCleared: true as const }),
     since: r.since_head === null ? null : { head: r.since_head, incremental: r.range_base !== null && r.range_base !== r.merge_base },
     question: r.question,
     ...(r.tasks_json !== null && { tasks: JSON.parse(r.tasks_json) as NonNullable<RunDto["tasks"]> }),

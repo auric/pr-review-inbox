@@ -5,6 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import type { FoundTask, PrTask, TaskRule, TaskSource } from "../../shared/dto";
+import { secureUrl } from "../../shared/links";
 import { COMPILED } from "../build";
 import type { WorkerReply, WorkerRequest } from "./worker";
 
@@ -169,8 +170,6 @@ export async function extractSkipping(runner: TaskRunner, rules: TaskRule[], inp
   }
 }
 
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 // Accepts https, or http on loopback, with {key} outside the origin and no credentials. Returns null otherwise.
 export function validTaskLink(raw: string): string | null {
   if (!raw.includes("{key}")) return null;
@@ -178,7 +177,7 @@ export function validTaskLink(raw: string): string | null {
     const a = new URL(raw.replaceAll("{key}", "A"));
     const b = new URL(raw.replaceAll("{key}", "B"));
     if (a.origin !== b.origin || a.username || a.password) return null;
-    if (a.protocol === "https:" || (a.protocol === "http:" && LOOPBACK.has(a.hostname))) return raw;
+    if (secureUrl(a)) return raw;
   } catch {}
   return null;
 }

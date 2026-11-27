@@ -695,6 +695,8 @@ export type RunDto = {
   // Computed on read: a head of the PR differs from the reviewed head. null: both heads are the same.
   stale: { source: boolean; target: boolean } | null;
   hasRaw: boolean;
+  // Audit S2: the start-up cleanup cleared the raw output and the tool calls of this run of a long-archived PR.
+  logCleared?: true;
   // A re-review: head is the head that the base run reviewed. incremental: false when the run fell back to the full change.
   since: { head: string; incremental: boolean } | null;
   // An ask run only.

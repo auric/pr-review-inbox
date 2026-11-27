@@ -57,6 +57,7 @@ import m054_task_question_point from "./migrations/054_task_question_point.sql" 
 import m056_task_fetch from "./migrations/056_task_fetch.sql" with { type: "text" };
 import m057_task_external from "./migrations/057_task_external.sql" with { type: "text" };
 import m058_run_related from "./migrations/058_run_related.sql" with { type: "text" };
+import m059_run_log_cleared from "./migrations/059_run_log_cleared.sql" with { type: "text" };
 
 // Index i holds the SQL that raises user_version from i to i + 1. The list order, not the file number, sets the version.
 const MIGRATIONS = [
@@ -118,6 +119,7 @@ const MIGRATIONS = [
   m056_task_fetch,
   m057_task_external,
   m058_run_related,
+  m059_run_log_cleared,
 ];
 
 const tables = (db: Database) =>

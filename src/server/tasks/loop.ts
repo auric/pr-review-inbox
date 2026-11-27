@@ -22,6 +22,7 @@ import {
   ASK_TEXT,
   allowProblem,
   BASE_CHECK_AGE_MS,
+  BUILT_PARTS,
   type CommandKind,
   DEFAULT_TEST_GLOBS,
   FAILURE_TAIL,
@@ -211,7 +212,6 @@ export const LOCK_GLOBS = ["bun.lock", "package-lock.json", "yarn.lock", "pnpm-l
 const WORKTREE = new Set<PartState>(["implementing", "self_reviewed", "pr_open", "changes_requested", "approved"]);
 // spec.md sections 6.20.6 and 6.20.7: a PR that colleagues review, a started part, and a part that keeps the task in implementing.
 const HAS_PR = new Set<PartState>(["pr_open", "changes_requested", "approved"]);
-const BUILT = new Set<PartState>(["self_reviewed", ...HAS_PR]);
 const STARTED = new Set<PartState>([...WORKTREE, "declined"]);
 const WAITS_PR = new Set<PartState>(["planned", "implementing", "self_reviewed"]);
 const NO_TEST = "Needs you: approve a test command for this repository first. The build needs it to see red and green tests.";
@@ -2889,7 +2889,7 @@ export function createLoop(opts: LoopOptions) {
   function goOn(db: Database, id: number, partId: number | null, reset: Reset, before: TaskBlocked | null = null) {
     const part = partId === null ? undefined : parts(db, id).find((p) => p.id === partId);
     const queued = !!part && db.query(Q.follow).get({ part: part.id }) !== null;
-    if (part && (queued || (BUILT.has(part.state) && !part.adopted))) goPart(db, id, part.id, before);
+    if (part && (queued || (BUILT_PARTS.has(part.state) && !part.adopted))) goPart(db, id, part.id, before);
     else if (taskRow(db, id)?.state === "implementing") kick(db, id, reset);
   }
 
