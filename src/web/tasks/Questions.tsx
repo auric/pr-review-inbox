@@ -4,18 +4,19 @@
 // The Questions form (docs/plans/review-v2/spec.md sections 6.12 and 7.1, AC-UX5): each question with "Why it matters", radio
 // buttons with the recommended option preselected and labeled, an optional note, "Send answers", and "Use the recommended answers".
 // The answered questions of earlier rounds show below as a read-only list.
-import { TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { Check, Copy, Download, TriangleAlert } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FieldDescription, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
+import { toast } from "@/components/ui/toast";
 import { MAX_TASK_ANSWER, type TaskAnswersInput, type TaskQuestionDto } from "../../shared/dto";
+import { copyText } from "../lib/clipboard";
+import { questionsMarkdown, recommendedOf } from "./model";
 
 type Pick = { choice: number | null; text: string };
 
-// ps5-plan.md section 4.4: a push-back question (point set) has no recommended option, and its answer needs an option.
-const recommendedOf = (q: TaskQuestionDto) => (q.kind === "choice" && q.point === null ? q.recommended : null);
 const start = (qs: TaskQuestionDto[]): Record<number, Pick> =>
   Object.fromEntries(qs.map((q) => [q.id, { choice: recommendedOf(q), text: "" }]));
 
@@ -33,6 +34,9 @@ export function answersOf(qs: TaskQuestionDto[], picks: Record<number, Pick>): T
 }
 
 export function QuestionsForm(props: {
+  task: { key: string; title: string };
+  // The interview summary that the screen shows above the form. The Markdown export includes it.
+  summary?: string | null;
   questions: TaskQuestionDto[];
   // spec.md section 6.25.6: the part of each loop question in a task with sub-tasks.
   label?: (q: TaskQuestionDto) => string | null;
@@ -65,6 +69,10 @@ export function QuestionsForm(props: {
         send();
       }}
     >
+      <ExportBar
+        markdown={() => questionsMarkdown(props.task, questions, { summary: props.summary, label: props.label })}
+        file={`${props.task.key}-questions.md`}
+      />
       {questions.map((q, i) => {
         const p = picks[q.id] ?? { choice: null, text: "" };
         const why = `tq-${q.id}-why`;
@@ -160,6 +168,56 @@ export function QuestionsForm(props: {
         )}
       </div>
     </form>
+  );
+}
+
+// The open questions as Markdown for another session. The visible text names each button. The file name keeps only safe characters.
+function ExportBar({ markdown, file }: { markdown: () => string; file: string }) {
+  // A count, so a second copy within 1.5 s starts the time again.
+  const [copied, setCopied] = useState(0);
+  const [said, setSaid] = useState("");
+  useEffect(() => {
+    if (!copied) return;
+    const h = setTimeout(() => {
+      setCopied(0);
+      setSaid("");
+    }, 1500);
+    return () => clearTimeout(h);
+  }, [copied]);
+  const copy = () =>
+    copyText(markdown()).then((ok) => {
+      if (!ok) return toast.add({ title: "The clipboard is blocked here. Select the text and press Ctrl+C." });
+      setCopied((n) => n + 1);
+      setSaid("Copied");
+    });
+  const save = () => {
+    const url = URL.createObjectURL(new Blob([markdown()], { type: "text/markdown;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.replace(/[^\w.-]/g, "_");
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button type="button" variant="outline" size="sm" onClick={copy}>
+        {copied ? (
+          <Check key={copied} data-icon="inline-start" aria-hidden className="rl-pop" />
+        ) : (
+          <Copy data-icon="inline-start" aria-hidden />
+        )}
+        {copied ? "Copied" : "Copy as Markdown"}
+      </Button>
+      <Button type="button" variant="outline" size="sm" onClick={save}>
+        <Download data-icon="inline-start" aria-hidden />
+        Save .md
+      </Button>
+      <span aria-live="polite" className="sr-only">
+        {said}
+      </span>
+    </div>
   );
 }
 

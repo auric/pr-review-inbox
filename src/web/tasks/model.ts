@@ -4,6 +4,7 @@
 // The Task view model (docs/plans/review-v2/spec.md sections 6.12 and 7): one status sentence that names who acts or what the app
 // waits for, at most one primary action, and the More actions, per state. Pure: tests/web/tasks-model.test.ts has one test per row.
 // runner: the short name of the CLI from meta, because UI code names no product (tests/ui/names.test.ts).
+import { indentBlock, oneLine } from "../../shared/consult";
 import {
   type AttachmentDto,
   type AttachmentMeta,
@@ -199,6 +200,48 @@ const partStep = (t: Pick<TaskDto, "steps">, part: number): TaskStepDto | null =
 // ps5-plan.md section 4.4: a push-back question can wait in ready too, so both states read the loop questions.
 export const questionSource = (t: Pick<TaskDto, "state">): TaskQuestionDto["source"] =>
   t.state === "implementing" || t.state === "ready" ? "loop" : "interview";
+
+// ps5-plan.md section 4.4: a push-back question (point set) has no recommended option, and its answer needs an option.
+export const recommendedOf = (q: TaskQuestionDto) => (q.kind === "choice" && q.point === null ? q.recommended : null);
+
+// The open questions as Markdown for another AI session (Copy as Markdown, Save .md). The AI wrote the question text, so each
+// field stays on one line; the summary is an indented block. It marks the recommended option as the form does.
+export function questionsMarkdown(
+  t: Pick<TaskDto, "key" | "title">,
+  questions: TaskQuestionDto[],
+  o: { summary?: string | null; label?: (q: TaskQuestionDto) => string | null } = {},
+): string {
+  const out = [
+    `# Open questions: ${oneLine(t.key)} ${oneLine(t.title)}`,
+    "",
+    "Answer each question below. For a question with options, pick one option by its number, or write your own answer. Give the reason for each answer. Name the files, lines, or facts that support it. If you cannot answer a question, say so and say what is missing.",
+    "",
+  ];
+  if (o.summary?.trim()) out.push("## Summary of the task", "", indentBlock(o.summary.trim()), "");
+  questions.forEach((q, i) => {
+    const part = o.label?.(q);
+    out.push(`## Question ${i + 1}: ${oneLine(q.text)}`, "");
+    if (part) out.push(`Part: ${oneLine(part)}`, "");
+    if (q.point) {
+      if (q.point.check) out.push(`- Check: ${oneLine(q.point.check)}`);
+      out.push(
+        `- Reason: ${oneLine(q.point.reason)}`,
+        `- Proof: ${q.point.cite ? `\`${oneLine(q.point.cite).replaceAll("`", "'")}\`` : "none"}`,
+      );
+      if (!q.point.citeFound) out.push("- The app did not find this place in the code or the plan.");
+    } else out.push(`Why it matters: ${oneLine(q.why)}`);
+    out.push("");
+    if (q.kind === "choice") {
+      const rec = recommendedOf(q);
+      q.options.forEach((x, k) => {
+        const detail = x.detail.trim() ? ` — ${oneLine(x.detail)}` : "";
+        out.push(`${k + 1}. ${oneLine(x.label)}${detail}${rec === k ? " (recommended)" : ""}`);
+      });
+    } else out.push("This question needs a written answer.");
+    out.push("");
+  });
+  return out.join("\n");
+}
 
 // The part that the build works on or that waits for its PR: the first code part that did not merge or drop out.
 export function currentPart(t: Pick<TaskDto, "parts">): TaskPartDto | null {

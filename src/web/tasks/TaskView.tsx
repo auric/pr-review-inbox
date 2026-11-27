@@ -974,6 +974,8 @@ function Content(props: {
         {open.length > 0 && t.blocked && (
           <QuestionsForm
             key={open.map((x) => x.id).join(",")}
+            task={t}
+            summary={loop ? null : t.interview?.summary}
             questions={open}
             label={(q) => questionPart(t, q)}
             busy={busy}

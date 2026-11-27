@@ -72,6 +72,7 @@ import {
   prTitle,
   questionPart,
   questionSource,
+  questionsMarkdown,
   REPOS_SHOWN,
   readyNotes,
   repairAnswer,
@@ -2403,7 +2404,15 @@ describe("ps5-plan.md section 4.4: push-back questions", () => {
   const card = { id: 31, check: "The loop reads past the end.", reason: "The guard at line 4 stops it.", cite: "src/a.ts:4" };
   const pushback = question({ id: 5, source: "loop", point: { ...card, citeFound: true }, recommended: 0 });
   const form = (questions: TaskQuestionDto[]) =>
-    renderToStaticMarkup(createElement(QuestionsForm, { questions, busy: false, onSend: () => {}, onRecommended: () => {} }));
+    renderToStaticMarkup(
+      createElement(QuestionsForm, {
+        task: { key: "ABC-1", title: "Add a flag" },
+        questions,
+        busy: false,
+        onSend: () => {},
+        onRecommended: () => {},
+      }),
+    );
 
   test("the loop questions in implementing and ready, the interview questions before the build", () => {
     expect(questionSource(building())).toBe("loop");
@@ -2441,6 +2450,63 @@ describe("ps5-plan.md section 4.4: push-back questions", () => {
     expect(answersOf([pushback], { 5: { choice: 1, text: "" } })).toEqual([{ question: 5, choice: 1 }]);
     const plain = question({ id: 6 });
     expect(answersOf([plain], { 6: { choice: null, text: "Keep it short." } })).toEqual([{ question: 6, text: "Keep it short." }]);
+  });
+});
+
+// Copy as Markdown and Save .md: the open questions for another session.
+describe("the open questions as Markdown", () => {
+  const T = { key: "ABC-1", title: "Add a flag" };
+  const card = {
+    id: 31,
+    check: "The loop reads past the end.",
+    reason: "The guard\nat line 4 stops it.",
+    cite: "src/a.ts:4",
+    citeFound: false,
+  };
+
+  test("a choice question numbers its options and marks the recommended one", () => {
+    const options = [
+      { label: "Keep it", detail: "No test changes." },
+      { label: "Drop it", detail: "" },
+    ];
+    const md = questionsMarkdown(T, [question({ options })]);
+    expect(md).toStartWith("# Open questions: ABC-1 Add a flag\n");
+    expect(md).toContain("pick one option by its number, or write your own answer.");
+    expect(md).toContain(
+      "## Question 1: Keep the old behavior?\n\nWhy it matters: It changes the tests.\n\n1. Keep it — No test changes. (recommended)\n2. Drop it\n",
+    );
+  });
+
+  test("a push-back question shows the card lines and no recommended mark", () => {
+    const md = questionsMarkdown(T, [question({ source: "loop", point: card, recommended: 0 })]);
+    expect(md).toContain("- Check: The loop reads past the end.\n- Reason: The guard at line 4 stops it.\n- Proof: `src/a.ts:4`\n");
+    expect(md).toContain("- The app did not find this place in the code or the plan.");
+    expect(md).not.toContain("(recommended)");
+    expect(md).not.toContain("Why it matters");
+  });
+
+  test("a text question asks for a written answer", () => {
+    const md = questionsMarkdown(T, [question({ kind: "text", options: [], recommended: null })]);
+    expect(md).toContain("This question needs a written answer.");
+    expect(md).not.toMatch(/^1\. /m);
+  });
+
+  test("multi-line text stays on one line, the summary is an indented block, and the part label shows", () => {
+    const q = question({ text: "Keep it?\n# Not a heading", why: "One\r\ntwo", options: [{ label: "A\nB", detail: "c\nd" }] });
+    const md = questionsMarkdown(T, [q], { summary: "Line one.\n## Line two.", label: () => "Part 2: ABC-2" });
+    expect(md).toContain(
+      "## Question 1: Keep it? # Not a heading\n\nPart: Part 2: ABC-2\n\nWhy it matters: One two\n\n1. A B — c d (recommended)\n",
+    );
+    expect(md).toContain("## Summary of the task\n\n    Line one.\n    ## Line two.\n");
+    expect(md).not.toMatch(/^# Not a heading/m);
+  });
+
+  test("the form shows Copy as Markdown and Save .md", () => {
+    const html = renderToStaticMarkup(
+      createElement(QuestionsForm, { task: T, questions: [question()], busy: false, onSend: () => {}, onRecommended: () => {} }),
+    );
+    expect(html).toContain("Copy as Markdown");
+    expect(html).toContain("Save .md");
   });
 });
 

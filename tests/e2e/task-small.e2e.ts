@@ -151,6 +151,7 @@ const chip = (page: Page, name: string) => page.getByRole("radio", { name, exact
 
 test("a small task: the Build form, questions, plan with the branch and the warning, a size note over the line limit, Open the PR, Close, and Continue", async ({
   page,
+  context,
 }) => {
   test.setTimeout(420_000);
   await control("claude", {
@@ -212,6 +213,14 @@ test("a small task: the Build form, questions, plan with the branch and the warn
   await expect(form.getByRole("radio", { name: /Keep it/ })).toBeChecked();
   await expect(form.getByText("Recommended", { exact: true })).toBeVisible();
   await expect(form.getByText("Why it matters: Echo: it changes the tests.")).toBeVisible();
+  // Copy as Markdown puts the open questions on the clipboard for another session.
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: APP });
+  await form.getByRole("button", { name: "Copy as Markdown" }).click();
+  await expect(form.getByRole("button", { name: "Copied" })).toBeVisible();
+  const md = (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n");
+  expect(md).toMatch(/^# Open questions: \S+ /);
+  expect(md).toContain("Why it matters: Echo: it changes the tests.");
+  expect(md).toMatch(/^1\. Keep it.* \(recommended\)$/m);
   await primary(page).click();
   await expect(form.getByRole("radio", { name: /Keep it/ })).toBeFocused();
   await form.getByRole("button", { name: "Send answers" }).click();

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build a Jira task: the questions screen has "Copy as Markdown" and "Save .md". They give you the open questions with their options, so you can answer them in your own Claude Code session first.
 - My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."
 - Inbox: the "1 updated · re-sort" chip no longer stays for a pull request that you opened from a link outside the view. Before, a click on the chip did not clear it.
 - Review profiles: the new switch "Thorough review" runs a full review twice at once and merges the findings. A point that both runs raise shows once. It uses about twice the Claude usage.
