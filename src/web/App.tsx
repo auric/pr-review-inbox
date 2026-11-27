@@ -617,6 +617,18 @@ function Shell({ stale }: { stale: boolean }) {
     [locked],
   );
 
+  // The "new commits" chip of a row: the PR opens with the brief for a re-review, as key c does.
+  const onRereview = useCallback(
+    (id: number) => {
+      pending.current = "rereview";
+      opened.current = true;
+      // The Explain page hides the brief.
+      setDetail((d) => (d.explain ? { ...d, explain: false } : d));
+      setKs((k) => ({ ...k, selected: id, settings: locked, focus: "detail", mobile: "detail" }));
+    },
+    [locked],
+  );
+
   // Settings open at the top, at a section, or at one profile. Each open pushes a history entry (navMode).
   // focus: the ID of a field that takes the focus after Settings mounts. The opener can unmount in this render.
   const openSettings = (section: SettingsSection | null = null, profile: string | null = null, focus?: string) => {
@@ -770,6 +782,7 @@ function Shell({ stale }: { stale: boolean }) {
             onDoneOpen={setDoneOpen}
             onSelect={onOpen}
             onOpen={onOpen}
+            onRereview={onRereview}
             onFollow={() =>
               follow.mutate(query.trim(), {
                 onSuccess: () => {

@@ -756,3 +756,60 @@ describe("PrRow.staleDrafts (thread-outcome.md section 11)", () => {
     expect((await h.json<PrDetail>(`/api/prs/${p}`)).body.pr.staleDrafts).toBe(3);
   });
 });
+
+describe("PrRow.rereview (web/review/model.ts rereviewState)", () => {
+  test("it shows when the newest review run ended with a result and the source head moved since", async () => {
+    const h = await setup();
+    const p = h.pr({ source_head: "c3" });
+    const run = (o: { kind?: string; status?: string; head?: string; summary?: string | null; explain?: number | null } = {}) =>
+      h.db
+        .query(`INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, status, started_at, summary_json, explain)
+          VALUES ($p, $kind, 'general', '', $key, $head, 't', $status, 1, $summary, $explain) RETURNING id`)
+        .get({
+          p,
+          kind: o.kind ?? "review",
+          key: crypto.randomUUID(),
+          head: o.head ?? "c1",
+          status: o.status ?? "completed",
+          summary: o.summary === undefined ? "{}" : o.summary,
+          explain: o.explain === undefined ? 0 : o.explain,
+        }) as { id: number };
+    const commit = (hash: string, ord: number) =>
+      h.db
+        .query("INSERT INTO pr_commit (pr, hash, ord, message, author_name, ts) VALUES ($p, $hash, $ord, 'm', 'A', 1)")
+        .run({ p, hash, ord });
+    const rereview = async () => (await h.row(p))?.rereview;
+
+    expect(await rereview()).toBeNull();
+    const first = run();
+    // The stored commit list does not hold the head of the run yet.
+    expect(await rereview()).toEqual({ commits: null });
+    commit("c3", 0);
+    commit("c2", 1);
+    commit("c1", 2);
+    expect(await rereview()).toEqual({ commits: 2 });
+    // A newer run of another kind and a newer failed or cancelled review do not hide it.
+    run({ kind: "ask" });
+    run({ status: "failed", summary: null });
+    run({ status: "cancelled", summary: null });
+    expect(await rereview()).toEqual({ commits: 2 });
+    // A running review hides it.
+    const running = run({ status: "running", summary: null });
+    expect(await rereview()).toBeNull();
+    h.db.query("DELETE FROM review_run WHERE id = $id").run({ id: running.id });
+    // An Explain run hides it, also one made before the explain flag was stored.
+    const explain = run({ explain: 1 });
+    expect(await rereview()).toBeNull();
+    h.db.query("UPDATE review_run SET explain = NULL, profile = 'explain' WHERE id = $id").run({ id: explain.id });
+    expect(await rereview()).toBeNull();
+    h.db.query("DELETE FROM review_run WHERE id = $id").run({ id: explain.id });
+    // A run without a result hides it.
+    h.db.query("UPDATE review_run SET summary_json = NULL WHERE id = $id").run({ id: first.id });
+    expect(await rereview()).toBeNull();
+    h.db.query("UPDATE review_run SET summary_json = '{}' WHERE id = $id").run({ id: first.id });
+    // A review of the current head hides it.
+    run({ head: "c3" });
+    expect(await rereview()).toBeNull();
+    expect((await h.json<PrDetail>(`/api/prs/${p}`)).body.pr.rereview).toBeNull();
+  });
+});

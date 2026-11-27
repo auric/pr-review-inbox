@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ihor Lifanov
 
 // The start of review, re-review, and reply-draft runs, and the brief that a review starts from (plan v3 WP11, r2 UI-RR, replies.md step 6).
-import { useState } from "react";
+import { useLayoutEffect, useReducer, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
 import type { CommitDto, MetaDto, PrRow, RunConflict, RunDto } from "../../shared/dto";
@@ -39,6 +39,8 @@ export function useStart(
     latest: RunDto | null;
     newest: RunDto | null;
     commits: CommitDto[] | undefined;
+    // The PR runs loaded, and a fetch after mount ended. Cached runs from an earlier visit can miss the new commits.
+    runsSettled: boolean;
     threads: ThreadModel[];
     announce: (text: string) => void;
     focusAfter: (f: Focus) => void;
@@ -110,9 +112,18 @@ export function useStart(
     setComposer(null);
     focusAfter({ id: "review-btn", block: "nearest", flash: false });
   };
-  const rereview = () => {
+  // Key c, the button, and the list chip. A PR that the chip just opened is still loading, so the check waits for its runs and brief.
+  const wantRereview = useRef(false);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  useLayoutEffect(() => {
+    if (!wantRereview.current || !o.runsSettled || brief.isPending) return;
+    wantRereview.current = false;
     if ("why" in rr) toast.add({ title: rr.why });
     else openBrief({ kind: "rereview" });
+  });
+  const rereview = () => {
+    wantRereview.current = true;
+    rerender();
   };
   // A re-review keeps the head of its base also when the brief profile makes it impossible, so the brief can say why.
   const mode: BriefMode =

@@ -4,6 +4,7 @@
 // Pure list and sidebar rules. No DOM access, so bun test runs them directly.
 
 import type { CheckpointDto, CheckpointReason, Group, PrRow, PrTask, SyncStatus, TaskSource } from "../../shared/dto";
+import { plural } from "../../shared/outcome";
 import { parsePrUrl } from "../../shared/pr-url";
 import type { PrRef } from "../../shared/types";
 import { GROUPS, VIEW_LABEL, VIEWS, type View } from "../../shared/views";
@@ -191,6 +192,10 @@ export function archiveWhy(p: PrRow, now: number): Why {
 // Both actions follow the PR, which also clears archived_at. A followed PR only leaves the archive.
 export const restoreWords = (p: Pick<PrRow, "archivedAt" | "followed">) =>
   p.archivedAt !== null && p.followed ? { verb: "Unarchive", done: "Unarchived" } : { verb: "Restore", done: "Restored" };
+
+// The re-review chip of a row (PrRow.rereview). null: no chip.
+export const rereviewText = (p: Pick<PrRow, "rereview">) =>
+  p.rereview && (p.rereview.commits ? plural(p.rereview.commits, "new commit") : "New commits");
 
 export const ARCHIVED_TEXT = "It moved to Archive. Restore it there at any time.";
 

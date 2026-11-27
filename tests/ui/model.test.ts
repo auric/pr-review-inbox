@@ -19,6 +19,7 @@ import {
   movedCount,
   navIds,
   repoTree,
+  rereviewText,
   restoreWords,
   statusInfo,
   taskHint,
@@ -61,6 +62,7 @@ const row = (o: Partial<PrRow>): PrRow => ({
   lastActivity: 0,
   checkpoint: null,
   build: null,
+  rereview: null,
   ...o,
 });
 
@@ -398,5 +400,14 @@ describe("failure toast text", () => {
     expect(failText(Object.assign(new Error("Forbidden"), { status: 403, stale: false }))).toBe(
       "Forbidden. Try again, or reload the pull request.",
     );
+  });
+});
+
+describe("rereviewText", () => {
+  test("the chip names the count of new commits, or only the new commits when the count is unknown", () => {
+    expect(rereviewText(row({}))).toBeNull();
+    expect(rereviewText(row({ rereview: { commits: null } }))).toBe("New commits");
+    expect(rereviewText(row({ rereview: { commits: 1 } }))).toBe("1 new commit");
+    expect(rereviewText(row({ rereview: { commits: 3 } }))).toBe("3 new commits");
   });
 });

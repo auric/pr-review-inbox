@@ -471,6 +471,9 @@ export type PrRow = {
   lastActivity: number;
   checkpoint: CheckpointDto | null;
   build: BuildDto | null;
+  // The newest review run ended with a result and the source head moved since (web/review/model.ts rereviewState). null: no re-review.
+  // commits: the PR commits after the head of that run. null: the stored commit list does not hold that head.
+  rereview: { commits: number | null } | null;
 };
 
 // WP4 fills the optional forge fields below. The detail renders each part only when its field is present.

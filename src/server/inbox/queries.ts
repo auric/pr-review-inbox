@@ -32,6 +32,10 @@ const UNREAD = "c.pr = p.id AND p.followed = 1 AND c.tombstoned_at IS NULL AND (
 const LISTED = "p.archived_at IS NULL AND (p.followed = 1 OR p.on_dashboard = 1)";
 // The complement of LISTED, so each PR shows in one list (views.ts archived).
 const ARCHIVED = "p.archived_at IS NOT NULL OR (p.followed = 0 AND p.on_dashboard = 0)";
+// lr: web/review/model.ts latestReview. The condition is rereviewState without the brief checks: the run ended with a result, it was
+// no Explain run, and the source head moved since.
+const REREVIEW = `lr.status <> 'running' AND lr.summary_json IS NOT NULL AND COALESCE(lr.explain, lr.profile = 'explain') = 0
+      AND p.source_head IS NOT NULL AND p.source_head <> lr.source_head`;
 // prototype/v3 snippet(): the default length.
 const SNIPPET = 110;
 
@@ -44,9 +48,12 @@ function scoped(scope: string) {
       p.on_dashboard, p.followed, p.archived_at, p.reviewers_json, p.seen_at,
       (SELECT COUNT(*) FROM comment c WHERE ${UNREAD}) AS unread,
       MAX(COALESCE(p.updated_date, 0), COALESCE((SELECT MAX(c.updated_at) FROM comment c WHERE c.pr = p.id), 0)) AS last_activity,
-      k.scope IS NOT NULL AS has_checkpoint, k.last_complete_at, k.incomplete_reason, k.last_error, ${BUILD_COLUMNS}
+      k.scope IS NOT NULL AS has_checkpoint, k.last_complete_at, k.incomplete_reason, k.last_error, ${BUILD_COLUMNS},
+      ${REREVIEW} AS rereview, (SELECT NULLIF(pc.ord, 0) FROM pr_commit pc WHERE pc.pr = p.id AND pc.hash = lr.source_head) AS rereview_commits
     FROM pull_request p LEFT JOIN sync_checkpoint k ON k.scope = 'pr:' || p.id LEFT JOIN pr_branch_link b ON b.pr = p.id
       LEFT JOIN pr_build pb ON pb.pr = p.id
+      LEFT JOIN review_run lr ON lr.id = (SELECT r.id FROM review_run r WHERE r.pr = p.id AND r.kind = 'review'
+        ORDER BY r.status IN ('cancelled', 'failed'), r.id DESC LIMIT 1)
     WHERE ${where}`,
     // One query for the comments of all PRs in the scope.
     turns: `SELECT c.pr, c.comment_id, c.root_id, c.author_slug, c.author_name, c.author_login, c.text, c.thread_resolved, c.created_at,
@@ -128,6 +135,8 @@ type RawRow = RawBuild & {
   last_complete_at: number | null;
   incomplete_reason: string | null;
   last_error: string | null;
+  rereview: number | null;
+  rereview_commits: number | null;
 };
 
 type TurnRow = {
@@ -235,6 +244,7 @@ const toRow = (r: RawRow, t: Turns, tasks: PrTask[], staleDrafts: number): PrRow
   lastActivity: r.last_activity,
   checkpoint: r.has_checkpoint ? toCheckpoint(r) : null,
   build: toBuild(r, r.source_head),
+  rereview: r.rereview ? { commits: r.rereview_commits } : null,
 });
 
 function selectRows(db: Database, me: string, sql: Scope, id: number | null): PrRow[] {

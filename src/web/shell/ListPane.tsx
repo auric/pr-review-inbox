@@ -10,6 +10,7 @@ import {
   CircleAlert,
   CircleDashed,
   CircleX,
+  GitCommitHorizontal,
   History,
   Hourglass,
   LoaderCircle,
@@ -32,7 +33,7 @@ import { BUILD_WORD, buildHint } from "../pr/build";
 import type { ReadyLine } from "../publish/model";
 import { runWhy } from "../review/model";
 import { createHints, Hint, type Hints, HintTrigger, SharedHint } from "./Hint";
-import { ago, archiveWhy, incompleteText, type ListGroup, prKey, restoreWords, taskHint, why } from "./model";
+import { ago, archiveWhy, incompleteText, type ListGroup, prKey, rereviewText, restoreWords, taskHint, why } from "./model";
 
 // prototype/v3 kbd: an outlined mono key.
 const kbd = "border border-rule-strong bg-transparent font-mono text-[11px] text-ink-2";
@@ -79,6 +80,8 @@ export function ListPane(props: {
   onDoneOpen: (open: boolean) => void;
   onSelect: (id: number) => void;
   onOpen: (id: number) => void;
+  // The re-review chip: opens the PR with the review brief for the new commits.
+  onRereview: (id: number) => void;
   onFollow: () => void;
   onMenu: () => void;
   onFocus: () => void;
@@ -99,6 +102,7 @@ export function ListPane(props: {
           selected={p.id === props.selected}
           onSelect={props.onSelect}
           onOpen={props.onOpen}
+          onRereview={props.onRereview}
           onRestore={props.onRestore}
         />
       ))}
@@ -280,6 +284,7 @@ const Row = memo(function Row({
   selected,
   onSelect,
   onOpen,
+  onRereview,
   onRestore,
 }: {
   p: PrRow;
@@ -291,6 +296,7 @@ const Row = memo(function Row({
   selected: boolean;
   onSelect: (id: number) => void;
   onOpen: (id: number) => void;
+  onRereview: (id: number) => void;
   onRestore: ((p: PrRow) => void) | null;
 }) {
   const w = onRestore ? archiveWhy(p, now) : why(p, now);
@@ -298,8 +304,12 @@ const Row = memo(function Row({
   const task = p.tasks[0];
   const incomplete = incompleteText(p.checkpoint, forge);
   const { verb } = restoreWords(p);
+  // The Archive view has its Restore button at the same place.
+  const commits = onRestore ? null : rereviewText(p);
+  // The chip and the Restore button sit over the end of the last line.
+  const pad = commits ? "pr-32" : onRestore ? "pr-24" : undefined;
   return (
-    <li className={cn(onRestore && "relative")}>
+    <li className={cn((onRestore || commits) && "relative")}>
       <button
         type="button"
         id={`row-${p.id}`}
@@ -382,7 +392,7 @@ const Row = memo(function Row({
           </span>
         )}
         {ready ? (
-          <span className="min-w-0 truncate text-sm text-ink-2">
+          <span className={cn("min-w-0 truncate text-sm text-ink-2", pad)}>
             {ready.posts && (
               <>
                 <b className="font-semibold text-foreground">Ready:</b> {ready.posts}
@@ -392,10 +402,9 @@ const Row = memo(function Row({
             {ready.blocked}
           </span>
         ) : run ? (
-          <RunWhyLine run={run} />
+          <RunWhyLine run={run} className={pad} />
         ) : (
-          // The Restore button sits over the end of this line.
-          <span className={cn("flex min-w-0 items-baseline gap-2 text-sm text-ink-2", onRestore && "pr-24")}>
+          <span className={cn("flex min-w-0 items-baseline gap-2 text-sm text-ink-2", pad)}>
             {w.closed && <b className="shrink-0 font-semibold text-foreground">{w.closed}</b>}
             {w.turn?.kind === "your" && (
               <span className="inline-flex shrink-0 items-center gap-1.5 self-center font-semibold whitespace-nowrap text-turn">
@@ -437,16 +446,31 @@ const Row = memo(function Row({
           {verb}
         </Button>
       )}
+      {commits && (
+        <HintTrigger hints={hints} label="Open the review brief for the commits since the last review.">
+          <Button
+            variant="outline"
+            size="xs"
+            data-rereview-chip
+            aria-label={`${commits} in ${prKey(p)}: review them`}
+            className="absolute right-4 bottom-[calc(var(--row-y)-2px)]"
+            onClick={() => onRereview(p.id)}
+          >
+            <GitCommitHorizontal aria-hidden data-icon="inline-start" />
+            {commits}
+          </Button>
+        </HintTrigger>
+      )}
     </li>
   );
 });
 
 // prototype/v3 whyRun: the state, the findings, the profile, and the outcome of the newest run.
 // The chip is a word. An error adds an icon and the error hue.
-function RunWhyLine({ run }: { run: RunDto }) {
+function RunWhyLine({ run, className }: { run: RunDto; className: string | undefined }) {
   const w = runWhy(run);
   return (
-    <span className="flex min-w-0 items-center gap-2 text-sm text-ink-2">
+    <span className={cn("flex min-w-0 items-center gap-2 text-sm text-ink-2", className)}>
       <Badge
         variant={w.error ? "destructive" : "quiet"}
         data-run-chip={run.status}

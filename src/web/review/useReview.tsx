@@ -133,7 +133,8 @@ export function useReview(
   },
 ): ReviewUi {
   const meta = useMeta().data as MetaDto;
-  const prRuns = usePrRuns(pr.id).data;
+  const runsQ = usePrRuns(pr.id);
+  const prRuns = runsQ.data;
   // R14: the run list shows the newest run of each kind. The newest review run drives the drafts, the summary, and the brief.
   const newest = prRuns?.[0] ?? null;
   const latest = latestReview(prRuns);
@@ -145,7 +146,8 @@ export function useReview(
   const replies = useReplyDrafts(pr.id);
   const cancel = useCancelRun();
   const { focusAfter } = o;
-  const st = useStart(pr, { meta, latest, newest, commits: o.commits, threads: o.threads, announce: o.announce, focusAfter });
+  const runsSettled = !runsQ.isPending && (runsQ.isFetchedAfterMount || !runsQ.isFetching);
+  const st = useStart(pr, { meta, latest, newest, commits: o.commits, runsSettled, threads: o.threads, announce: o.announce, focusAfter });
   const runLog = useRunLog(latest, newest);
   const { log, openLog, closeLog } = runLog;
 

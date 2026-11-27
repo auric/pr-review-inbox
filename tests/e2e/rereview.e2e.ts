@@ -334,3 +334,42 @@ test("thread outcome section 9: the next review reads the answer to your posted 
   // Nothing posts before Accept.
   expect(await posts()).toHaveLength(1);
 });
+
+test("the inbox row of a reviewed PR with new commits has a chip; Tab reaches it, and Enter opens the PR with the brief for the new commits", async ({
+  page,
+}) => {
+  await connect(page);
+  const head = await reviewed(page);
+  const item = page.locator("li", { has: page.locator("[data-row]", { hasText: TITLE }) });
+  const chip = item.locator("[data-rereview-chip]");
+  await expect(chip).toHaveCount(0);
+
+  // The fake commit list does not hold the reviewed head, so the chip has no count, as the run line says "New commits since".
+  await control("state", { push: true });
+  await expect(chip).toHaveText("New commits");
+  // A reload empties the query cache, and the PR runs come late. So the chip acts while the detail still loads.
+  await page.route(/\/api\/prs\/\d+\/runs$/, async (r) => {
+    await new Promise((done) => setTimeout(done, 3000));
+    await r.continue();
+  });
+  await page.reload();
+  await expect(chip).toHaveText("New commits");
+  await item.locator("[data-row]").focus();
+  await page.keyboard.press("Tab");
+  await expect(chip).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("section[aria-label='Details'] h1")).toHaveText(TITLE);
+  const brief = page.locator("#brief");
+  await expect(brief.getByRole("heading", { name: `Review changes since ${head}` })).toBeVisible();
+  await expect(page.getByLabel("Your note")).toBeFocused();
+  await page.unrouteAll();
+
+  // A running review hides the chip.
+  await control("claude", { stream: "tree", hang: true });
+  await brief.getByRole("button", { name: "Review changes" }).click();
+  await expect(runLine(page)).toContainText(`Finding problems in the changes since ${head}…`);
+  await expect(chip).toHaveCount(0);
+  await runLine(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(runRow(page)).toHaveAttribute("data-run-state", "cancelled", { timeout: RUN_MS });
+  await expect(chip).toHaveText("New commits");
+});

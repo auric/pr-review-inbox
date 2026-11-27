@@ -38,6 +38,7 @@ const row = (o: Partial<PrRow>): PrRow => ({
   lastActivity: 0,
   checkpoint: null,
   build: null,
+  rereview: null,
   ...o,
 });
 
