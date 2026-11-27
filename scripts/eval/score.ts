@@ -65,7 +65,7 @@ export type EvalItem = {
   cause?: { path: string; side: Side; line: number; lineEnd: number | null; anchorText: string };
   // docs/plans/review-v2/minor-fold.md section 6.2: a polish point (variant "minor-fold"). Absent: false.
   polish?: boolean;
-  // docs/plans/review-v2/focused-passes.md WP-L2: the finder pass, from 1 (variants "lenses3" and "runs3"). Absent: a one-pass run.
+  // docs/plans/review-v2/focused-passes.md WP-L2: the finder pass, from 1 (variant "lenses3"). Absent: a one-pass run.
   pass?: number;
 };
 

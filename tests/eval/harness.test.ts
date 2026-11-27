@@ -200,9 +200,9 @@ describe("eval harness without --real (AC-M2)", () => {
       "reviewer",
     ]);
     expect(finderChange(base, { ...p.profile, variants: ["callers"] })).toEqual(["variants"]);
-    // focused-passes.md section 5.4: --candidate-replay refuses lenses3 and runs3, because they change the finder.
+    // focused-passes.md section 5.4: --candidate-replay refuses lenses3, because it changes the finder. style55 changes the finder too.
     expect(finderChange(base, { ...p.profile, variants: ["lenses3"] })).toEqual(["variants"]);
-    expect(finderChange(base, { ...p.profile, variants: ["runs3"] })).toEqual(["variants"]);
+    expect(finderChange(base, { ...p.profile, variants: ["style55"] })).toEqual(["variants"]);
     // The removed verify-only variants stay in VERIFY_ONLY, so an old recording with one of them still replays.
     expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "security2-verify", "verify2"]);
     expect(finderChange(base, { ...p.profile, variants: ["refute-issue"] })).toEqual([]);
@@ -353,7 +353,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, runs3, stack, submodules, twice.",
+        "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, stack, style55, submodules, twice.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {

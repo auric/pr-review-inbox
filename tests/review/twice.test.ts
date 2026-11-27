@@ -176,11 +176,10 @@ const alive = (pid: number) => {
 };
 
 describe("twice (catalog)", () => {
-  test("twice needs the variant; lenses3 and runs3 win", () => {
+  test("twice needs the variant; lenses3 wins", () => {
     expect(twice({ variants: ["twice"] })).toBe(true);
     expect(twice({ variants: [] })).toBe(false);
     expect(twice({ variants: ["lenses3", "twice"] })).toBe(false);
-    expect(twice({ variants: ["runs3", "twice"] })).toBe(false);
     expect(twice({ variants: ["twice", "callers"] })).toBe(true);
   });
 });

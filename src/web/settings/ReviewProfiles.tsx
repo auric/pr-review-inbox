@@ -835,6 +835,13 @@ function ProfileRow(rowProps: RowProps) {
           checked={d.variants.includes("twice")}
           onChange={(on) => edit({ variants: withVariant(d.variants, "twice", on) })}
         />
+        <Toggle
+          id={profileId(i, "history")}
+          label={<>Git history{of}</>}
+          help="The review reads why the changed lines were written, from the git history. Works best with a Jira MCP server in this profile."
+          checked={d.variants.includes("git-history")}
+          onChange={(on) => edit({ variants: withVariant(d.variants, "git-history", on) })}
+        />
       </div>
       <ChecksField {...props} />
       <RunSetup {...props} found={found} />

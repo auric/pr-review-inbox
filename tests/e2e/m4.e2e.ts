@@ -95,6 +95,7 @@ type SavedProfile = {
   reviewer?: unknown;
   verifier: { outcome?: string };
   languageChecks?: boolean;
+  variants?: string[];
 };
 async function settingsApi(request: APIRequestContext) {
   return (await (await request.get(`${APP}/api/settings`)).json()) as { checkSeconds: number; profiles: SavedProfile[] };
@@ -723,6 +724,26 @@ test("Language checks: on for Review and Security, saved at once, and a review r
   await row(page).click();
   const off = await review();
   for (const prompt of Object.values(off)) expect(prompt).not.toContain(" list:\n- ");
+});
+
+// docs/plans/review-v2/git-history.md: the profile switch of the variant "git-history". tests/review/git-history.test.ts covers the prompt.
+test("Git history: off by default, saved at once as the variant, and still on after a reload", async ({ page, request }) => {
+  await connect(page);
+  await openSettings(page);
+  const history = field(page, "Git history", 1);
+  await expect(history).not.toBeChecked();
+  await expect(page.locator("#profile-0-history-help")).toHaveText(
+    "The review reads why the changed lines were written, from the git history. Works best with a Jira MCP server in this profile.",
+  );
+  await history.check();
+  await saved(page);
+  await expect.poll(async () => (await settingsApi(request)).profiles[0]?.variants).toEqual(["git-history"]);
+  await reloadSettings(page);
+  await expect(field(page, "Git history", 1)).toBeChecked();
+  await expect(field(page, "Git history", 2)).not.toBeChecked();
+  await field(page, "Git history", 1).uncheck();
+  await saved(page);
+  await expect.poll(async () => (await settingsApi(request)).profiles[0]?.variants ?? []).toEqual([]);
 });
 
 test("Edit <profile> in the brief opens the settings at the checked profile, through the profile URL", async ({ page }) => {

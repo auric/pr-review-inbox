@@ -1,12 +1,12 @@
 # Research: Opus 5.5 prompting practice against the app prompts (2026-11-27)
 
-Status: research only. No code changed. Every expected effect is a guess until an eval runs. Code facts are at commit fa60e67.
+Status: research of 2026-11-27. The variant "style55" of section 8.1 is built opt-in and not measured. Every expected effect is a guess until an eval runs. Code facts are at commit fa60e67.
 
-Source rule (user, 2026-11-27): a recommendation counts only when a source written for Opus 5.5 states it, or a Claude 5 family source that an Opus 5.5 source says applies to 5.5. A practice that only older guidance states (Claude 3.x, Claude 4.x, generic prompt tips) is marked "older model, not used".
+Source rule (user, 2026-11-27): a recommendation counts only when a source written for Opus 5.5 states it, or a Claude 5 family source that an Opus 5.5 source says applies to 5.5. A practice that only older guidance states (Claude 3.x, Claude 4.x, generic prompt tips) is marked "older model, not used". Decision D1 (section 1) adds [BP] at lower priority, where [55] and [O5] are silent.
 
 ## 1. Short answer
 
-- Open decision D1 for the user: [55] says "For techniques that apply across all current Claude models, see Prompting best practices." Under a strict reading, the [BP] sections that name no model are generic and not used (section 5). Under a wide reading, [55] adopts them for Opus 5.5. This note uses the strict reading. With the wide reading, the idea "give the reason behind each rule" comes back as a style55 hypothesis (section 8.1, last bullet).
+- Decision D1 (user, 2026-11-27): use [55] first, then [O5] ([55] says it "remains a reasonable starting point"), then [BP] only where [55] and [O5] are silent, at lower priority. The first sentence of [BP] lists Claude Opus 5.5 among its models. So the [BP] rule "give the reason behind each rule" applies, and style55 holds it (section 8.1).
 - The review prompts already match the Opus 5.5 guidance. Opus 5.5 guidance asks for no rewrite of a working Opus 5 prompt. It names effort as the main control.
 - The review prompts have no ALL-CAPS or MUST emphasis, no "think carefully" text, no reasoning-in-the-reply request, and no "only report high-confidence" filter. One build-run line is a candidate to remove on 5.5 grounds: "Run it again after your change" (src/server/tasks/implement.ts:756), because the app runs the checks after the run anyway (row 21).
 - Our own data is consistent with the main review rule for the Claude 5 family. The U-V1 variant "signal" ("leave out low confidence") found 3 of 26 bugs against 7 of 26 without it (one repeat, bundled with other variants; docs/eval/results.md, U-V1).
@@ -24,7 +24,7 @@ All pages were read on 2026-11-27. The docs pages show no date, and the server s
 | [Blog] | "Getting the most out of Opus 5.5 in Claude and Claude Code" (the user's link), https://claude.dev/blog/getting-the-most-out-of-opus-5-5/ | 2026-09-22 | Opus 5.5 | yes, read in full |
 | [EF55] | "Effort", Opus 5.5 row of "Recommended effort levels", https://docs.claude.com/en/docs/build-with-claude/effort | undated, live 2026-11-27 | Opus 5.5 | yes, that row only |
 | [O5] | "Prompting Claude Opus 5", https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/prompting-claude-opus-5 | undated, live 2026-11-27 | Opus 5 | yes, through the [55] bridge below |
-| [BP] | "Prompting best practices", https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/claude-4-best-practices | undated, live 2026-11-27 | all current models; many sections name Opus 4.5 or 4.6 | only where a section names Opus 5.5 (see D1) |
+| [BP] | "Prompting best practices", https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/claude-4-best-practices | undated, live 2026-11-27 | all current models; many sections name Opus 4.5 or 4.6 | lower priority, only where [55] and [O5] are silent (D1) |
 | [CLI] | Claude Code CLI reference and sub-agents, https://code.claude.com/docs/en/cli-reference , https://code.claude.com/docs/en/sub-agents | undated, live 2026-11-27 | the CLI | facts about flags only |
 
 The bridge, [55]: "Existing Claude Opus 5 prompts should perform well without changes, and the patterns in Prompting Claude Opus 5 remain a reasonable starting point." So the [O5] patterns count, unless [55] says otherwise.
@@ -64,14 +64,14 @@ What is new against research/research-opus55.md (2026-10-22): that note read onl
 
 ## 5. Older guidance: not used
 
-These points appear only in older guidance, or in [BP] sections that name no model ("generic, no model named"). No 5.5-era source repeats them. They drive no change here. Decision D1 (section 1) can move the generic rows into use.
+These points appear only in older guidance, or in [BP] sections that name no model ("generic, no model named"). No 5.5-era source repeats them. Decision D1 (section 1) moves the generic rows into use at lower priority. Only the reason row drives a change (style55, section 8.1).
 
 | Practice | Where it is stated | Status | Our prompts |
 |---|---|---|---|
 | Soften "CRITICAL: You MUST" to normal wording | [BP], stated for Opus 4.5 and 4.6 | older model, not used | 0 ALL-CAPS words anyway, so nothing to remove |
 | Tune down anti-laziness prompting | [BP] migration list, stated for Claude 4.6 | older model, not used | No "be thorough" pressure found |
 | Use structured outputs instead of prefill | [BP] migration, stated for Claude 4.6 | older model, not used | We use `--json-schema` for app reasons, not on this advice |
-| Give the reason behind each rule | [BP] general principles | generic, no model named; not used | 2 of 90 rl-main lines give a reason. No change proposed (see D1). |
+| Give the reason behind each rule | [BP] general principles | generic; used at lower priority (D1) | 2 of 90 rl-main lines give a reason. style55 adds a one-sentence reason to 2 finder rules and 5 verify rules (section 8.1). |
 | "Tell Claude what to do instead of what not to do" | [BP] output-format section | generic, no model named; not used | 20 negative lines in rl-main, mostly scope and safety rules. No change proposed. |
 | Long documents first, question last | [BP] long-context section | generic, no model named; not used | Not relevant: inputs are ./context files read by tools |
 | Prompt for parallel tool calls | [BP] tool-use section | generic, no model named; not used | No parallel line. No change proposed. |
@@ -92,7 +92,7 @@ Gap: yes, no, or partial. "Bug" marks a text defect that needs no guidance to fi
 | 4 | No re-check lines in the finder (V1) | None. "Read each changed function to its end, and read its callers" (catalog.ts:97) is a read rule, not a re-check. Verify is a separate pass by app design. | No | None. | - |
 | 5 | Set effort explicitly, start at medium (E1) | Explicit medium on each run: finder, rl-reviewer, verifier, Explain (catalog.ts:130-135, 112, 1926; src/server/review/claude.ts:605). | No | None. | - |
 | 6 | Sweep effort on own evals; low comes close at lower cost (E2, E3, R1, R2) | C1b measured medium against high (results.md, W2). Low is not measured. | Yes | Cost arm E-LOW (section 8.2). No arm above medium: E2 says to reserve xhigh for a measured gain, and W2 showed no recall gain from high. | Guess: lower cost per case run at a recall risk that only the full set can bound. |
-| 7 | Low effort also for the filter pass (R2 "fast pass") | Verifier at medium (catalog.ts:135). | Partial | Verifier-low as a verify-only replay on the full r6 recording: `bun run eval` takes `--verifier-effort` and `--replay-find` (scripts/eval/run.ts:116, 231, 334-350). eval:ab has no candidate verifier-effort flag. | Guess: lower verify cost; risk of more wrong confirms. |
+| 7 | Low effort also for the filter pass (R2 "fast pass") | Verifier at medium (catalog.ts:135). | Partial | Verifier-low as a verify-only replay on the full r6 recording: `bun run eval` takes `--verifier-effort` and `--replay-find` (scripts/eval/run.ts:116, 231, 334-350). eval:ab also takes `--candidate-verifier-effort` (scripts/eval/ab.ts:108). | Guess: lower verify cost; risk of more wrong confirms. |
 | 8 | Review output: file, line, why, how to show it fails (R3) | Place rules, trigger, body, evidence (catalog.ts:620-624, 706-711). | No | None. | - |
 | 9 | Mark what you could not confirm (C1) | COVERAGE_RULE (catalog.ts:476), evidenceStatus (catalog.ts:712), "In why, name what you checked" (catalog.ts:630), ask: "Say so when you did not check a claim" (catalog.ts:1302). | No | None. | - |
 | 10 | Prompt for length explicitly (L1) | Title 12 words, body 3 sentences (catalog.ts:710). Spec line caps (catalog.ts:1431). | No | None. | - |
@@ -118,22 +118,21 @@ Both fixes change default prompt text. The repo rule says: "Every prompt change 
 
 - B1, nit contradiction in verify. Cause: verifyRules adds rubric(p) (catalog.ts:1833), and the rubric carries the finder volume line "Give no nits." (VOLUME_NITS, catalog.ts:859-863). RISK_BLOCK_RULES tells the verifier to set nit for a false comment (catalog.ts:1721). The opt-in POLISH_VERIFY (catalog.ts:689) and obligationRules (catalog.ts:1768) also set nit, so they meet the same line. Fix: in verifyRules only, replace the volume line with a verify line, for example "nit: optional polish. At volume quiet and balanced, the app folds nits." The display rule confirms it: quiet shows only blocker and major in main, and balanced folds a nit (src/shared/review.ts:302-303). The finder keeps "Give no nits". Test: the verify prompt has no "Give no nits" line, and the finder prompt still has it.
 - B2, dangling "One exception". Fix: start the line with the rule it changes, for example "One exception to the rule on what the change adds: you can also report a problem in unchanged code that the change touches or relies on." Move PREEXISTING_LINES to right after catalog.ts:699, before the anchor line and the submodule lines. Test: the pre-existing block follows the "Report only problems that the change adds" line in rl-main, rl-reviewer, and salvage, with and without submodules.
-- Delivery: B1 behind a verify-only variant "style55-verify", B2 behind "style55" (section 8.1). Ship both in the next REVIEW_PROMPT_VERSION bump even when nothing else ships, because they remove a defect and add no behavior.
+- Delivery: B1 and B2 behind one variant "style55" (section 8.1). Ship both in the next REVIEW_PROMPT_VERSION bump even when nothing else ships, because they remove a defect and add no behavior.
 
 ## 8. Proposed package
 
-### 8.1 Variants "style55-verify" and "style55": the bug fixes only
+### 8.1 Variant "style55": the bug fixes and the rule reasons (built opt-in, 2026-11-27)
 
-- Under the strict 5.5-only rule, no 5.5 source asks for a rewrite of a working Opus 5 review prompt ([55] bridge), and the 5.5 rules in section 6 are met. So the variants hold only B1 and B2. They add no new wording.
-- The split follows the existing pair "security2" and "security2-verify". "style55-verify" holds B1 only and joins VERIFY_ONLY (scripts/eval/run.ts:312), so it can replay the full r6 recording. "style55" holds B2 and also turns on B1.
-- Smallest diff: src/shared/dto.ts (add both names to VARIANTS); src/server/review/catalog.ts (the B1 nit line in verifyRules under either variant; the B2 order and wording in finderRules under "style55"); scripts/eval/run.ts (add "style55-verify" to VERIFY_ONLY). The default bytes stay the same.
-- Tests (pure, following tests/review/architecture.test.ts): the default prompts keep their bytes (snapshot); the B1 and B2 tests of section 7 under each variant; promptVersion gives "2.9+style55" and "2.9+style55-verify"; finderVersion drops "style55-verify". Control mutation: apply B2 without the variant, and the snapshot test must fail.
-- Also touched: tests/review/prompt.test.ts (VARIANTS pin), docs/eval/local.md (variant bullets), review-ledger.md (new rows). No UI change, so no screenshots.
-- Check of B1, verify-only replay on the full natural set: `bun run eval:ab -- --baseline <r6 folder> --candidate-variants style55-verify --candidate-replay --review-only`. It runs only the verify calls of 82 case runs. Estimate (guess): the verify share of $2.63, about $0.4 to $0.8 per case run, so $35 to $65, plus about $5 for labels. Ship rule "not worse".
+- The user asked for one variant, not the pair "style55-verify" and "style55". So no verify-only arm exists, and "style55" stays out of VERIFY_ONLY.
+- B1: under style55, verifyRules replaces the rubric nit line with "nit: optional polish. At volume quiet and balanced, the app folds nits." at every volume. rl-verify and rl-verifier get it. The finders keep "Give no nits".
+- B2: under style55, finderRules puts PREEXISTING_LINES, and STACK_PREEXISTING with a parent, right after "Report only problems that the change adds". The anchor line and SUBMODULE_FINDER follow. The line "One exception:" keeps its text, because it now follows the rule that it changes.
+- Reasons (D1, [BP] at lower priority): under style55, 7 main rules without a reason get one short sentence that states what the app does with the field. Finder: the anchor line and trigger. Verify: one verdict per candidate, reason, question, duplicateOf, and severity. REASONS_55 in catalog.ts holds them. The rule "Report only problems that the change adds" gets none, because the pre-existing block now follows it. evidenceStatus gets none, because the rubric already states its cap. confidence gets none: with the check on, the Low confidence chip follows the verdict, not the finder confidence (publish/plan.ts:49-50). No CAPS and no examples.
+- Code: src/shared/dto.ts (VARIANTS), src/server/review/catalog.ts (style55, REASONS_55, VERIFY_NIT_55). The default bytes stay the same. Tests: tests/review/style55.test.ts.
+- B1 has no verify-only replay, because style55 changes the finder. `--candidate-replay` refuses it (scripts/eval/run.ts:345-347). Check it with P-55 below.
 - Check of B2, optional screen P-55: the fixed 10-case natural subset of the lenses3 run, repeat 1, effort medium, against the same 10 cases of baseline r6, as P-GH did (results.md, 2026-11-26). Gate as P-GH (git-history.md section 5): the noise rule passes, and grounded recall is not below the subset baseline (35.7%, 10 of 28). Estimate: about $16, because the prompt does not grow and the subset baseline costs $1.59 per case run, plus about $2 for labels.
 - P-55 commands (case IDs as in the P-GH run; they live in eval-results, which this note did not read): `bun run eval -- --set local --cases <the 10 subset IDs> --variants style55 --repeat 1 --real --out eval-results/style55/subset`, then `bun run eval:label -- eval-results/style55/subset --real`, then the scratch trim of baseline r6 to the subset and `bun run eval:compare -- <trimmed r6 result.json> <style55 result.json>`. `--candidate-replay` refuses "style55", because B2 changes the finder prompt version (scripts/eval/run.ts:345-347).
 - Limit: the 10-case subset gave paired intervals of about ±15 to 20 points (lenses3 −4.9 to +26.3, git-history −28.1 to +6.7). P-55 is a not-worse screen, not a proof of gain.
-- Only if the user takes the wide reading of decision D1: add a "reasons" arm to "style55" (a 3-line purpose block in the finder and 2 lines in verify that say who reads the result and what each error costs). It is a recall hypothesis, so it runs apart from the cost arms.
 
 ### 8.2 Cost arm E-LOW (the main 5.5 experiment)
 

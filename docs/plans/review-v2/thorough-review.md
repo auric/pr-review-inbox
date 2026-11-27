@@ -7,7 +7,7 @@ Status: built and shipped opt-in on 2026-11-25. WP-T0, WP-T1a, WP-T1b, WP-T1c, a
 - A review run with the variant "twice" runs the shipped review two times at once on one head. Each run ("arm") is today's one-run path: finder, salvage, judge, verify, and settle.
 - Arm B gets its own snapshot: a second detached worktree of the same head and a copy of the other run files. Each arm has its own cwd, app folder, and runner.
 - After both arms end, the pure function `mergeRuns` joins the two settled results. It hides a second copy of one point: same path, same side, ranges within 3 lines, one to one.
-- A re-review, Explain, a task review, and every other run kind keep one run. lenses3 and runs3 win over twice.
+- A re-review, Explain, a task review, and every other run kind keep one run. lenses3 wins over twice. runs3 also won until its removal on 2026-11-27.
 - The UI switch "Thorough review" shipped after Gate T-0 and Gate T-P (section 4).
 
 ## 1. Evidence
@@ -110,7 +110,7 @@ Facts read from the stored r6 records on 2026-11-25 (estimates, not eval output)
 |---|---|
 | Re-review | One run. Two `earlier` verdict lists cannot merge (focused-passes.md section 9). A re-review carries only new and accepted items (rereview.ts:14), so hidden copies never carry. |
 | Explain, Ask, reply, fix, discuss, session, task review | One run. |
-| lenses3, runs3 | Their passes win (jobs.ts:1380). The log says that twice is off for the run. |
+| lenses3 (and runs3 until 2026-11-27) | Their passes win (jobs.ts:1380). The log says that twice is off for the run. |
 | obligations | The verify of each arm gets it. |
 | callers, architecture, classes, parts, minor-fold | Both arms get byte-identical prompts. |
 | stack, submodules | The context files build once. Arm B gets a copy. |

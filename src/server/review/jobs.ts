@@ -1413,15 +1413,14 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         risks: true,
         obligations: v.obligations,
       });
-    // docs/plans/review-v2/focused-passes.md sections 4.1 to 4.3: lenses3 and runs3 run their passes in sequence in this workspace, run
+    // docs/plans/review-v2/focused-passes.md sections 4.1 to 4.3: lenses3 runs its passes in sequence in this workspace, run
     // row, and run slot. A re-review, an Explain run, and every other run kind keep one pass.
-    const lenses = finder && !carry ? passLenses(profile) : [null];
+    const lenses = finder && !carry ? passLenses(profile) : [];
     if (lenses.length > 1) {
-      const won = profile.variants.includes("lenses3") ? "lenses3" : "runs3";
-      if (profile.variants.includes("twice")) log(`Review run ${j.id}: the variant twice is off, because ${won} runs its passes.`);
+      if (profile.variants.includes("twice")) log(`Review run ${j.id}: the variant twice is off, because lenses3 runs its passes.`);
       const n = lenses.length;
       const events: RunEvent[] = [];
-      const usable: { k: number; lens: Lens | null; found: Found }[] = [];
+      const usable: { k: number; lens: Lens; found: Found }[] = [];
       const lines: string[] = [];
       let usage: RunUsage | null = null;
       let endedAt = findStart;

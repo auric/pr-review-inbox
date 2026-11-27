@@ -688,18 +688,43 @@ export const POLISH_VERIFY = [
   "Never give question for a polish point. Set its severity to nit.",
 ];
 
+// docs/plans/review-v2/research/opus55-prompting.md sections 7 and 8.1: the variant "style55". B2 puts the pre-existing lines right after
+// the rule that they make an exception to. B1 gives the verify phase a nit line without "Give no nits" (VERIFY_NIT_55).
+export const style55 = (p: Partial<Pick<Profile, "variants">>) => has(p, "style55");
+// The reason of a rule, after the exact default line. Each reason states what the app does with the field: publish/outbox.ts posts
+// the anchor, judge.ts capOf reads the trigger and the verdict, and web/review/model.ts checkText shows the reason. style55.test.ts
+// checks that each key is still a line of a default prompt.
+export const REASONS_55: Record<string, string> = {
+  "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.":
+    "The app posts the finding as a comment on its anchor line.",
+  "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.":
+    "Without a trigger, the app makes the finding a question.",
+  "Give one entry in verdicts for each candidate.": "A candidate without a verdict stays unchecked.",
+  "In reason, name the guard or the list item with path:line.": "The finding card shows the reason.",
+  "When the code or the task text answers the point, give confirmed or refuted, not question.":
+    "The app turns a question verdict into a question for the author.",
+  "Set duplicateOf to the clearer candidate.": "The app hides the duplicate and keeps that candidate.",
+  "Set severity by the rubric below. Lower it for a rare trigger or a small impact.":
+    "The app uses this severity, not the finder severity.",
+};
+const reasons55 = (p: Partial<Pick<Profile, "variants">>, lines: string[]) =>
+  style55(p) ? lines.map((l) => (REASONS_55[l] ? `${l} ${REASONS_55[l]}` : l)) : lines;
+export const VERIFY_NIT_55 = "nit: optional polish. At volume quiet and balanced, the app folds nits.";
+
 // spec.md section 1.5. main: the lines about questions, which the rl-reviewer result has no field for. files: the context files of the run.
 // The Improve prompt and the salvage agent pass none (submodule-prs.md and stacked-prs.md WP-RP0).
 export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): string[] {
-  return [
+  const s55 = style55(p);
+  const preexisting = [...PREEXISTING_LINES, ...(files?.stack?.parent ? STACK_PREEXISTING : [])];
+  return reasons55(p, [
     checked(p)
       ? "Report every problem that you find. A second step checks each finding, so do not leave out a finding because you are not sure."
       : "Report every problem that you find, with its severity and its confidence.",
     "Report only problems that the change adds or makes reachable. BASE..HEAD is the change.",
+    ...(s55 ? preexisting : []),
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
     ...(files?.submodules ? SUBMODULE_FINDER : []),
-    ...PREEXISTING_LINES,
-    ...(files?.stack?.parent ? STACK_PREEXISTING : []),
+    ...(s55 ? [] : preexisting),
     ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
@@ -714,7 +739,7 @@ export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): 
     "Set category to security, concurrency, resource, or behavior for a finding of that class. resource: a leak or a missing release. behavior: a change that users or callers see.",
     ...(main ? FINDER_QUESTION_RULES : []),
     ...(main && files?.stack?.children ? STACK_FINDER : []),
-  ];
+  ]);
 }
 
 export const DO_NOT_FLAG = [
@@ -779,7 +804,7 @@ export const ARCHITECTURE_VERIFY = [
   "When both ways give the same result for each reachable input, refute it as a choice between two correct designs.",
 ];
 
-// docs/plans/review-v2/focused-passes.md sections 4.1 and 4.6: the finder passes of the variants "lenses3" and "runs3". The lens text is
+// docs/plans/review-v2/focused-passes.md sections 4.1 and 4.6: the finder passes of the variant "lenses3". The lens text is
 // frozen. An edit voids every earlier lenses3 result.
 export type Lens = "failure" | "contract" | "system";
 export const LENS_LINES: Record<Lens, readonly string[]> = {
@@ -808,15 +833,14 @@ export const LENS_LINES: Record<Lens, readonly string[]> = {
     "Report other problems too.",
   ],
 };
-// The pass label in the mark event, the gap lines, and the raw output. null: a runs3 pass.
-export const passLabel = (lens: Lens | null) =>
-  lens === null ? "repeat" : { failure: "failure paths", contract: "contracts and callers", system: "the whole change" }[lens];
-// One entry per finder pass of a full review. lenses3 wins over runs3.
-export const passLenses = (p: Partial<Pick<Profile, "variants">>): (Lens | null)[] =>
-  has(p, "lenses3") ? ["failure", "contract", "system"] : has(p, "runs3") ? [null, null, null] : [null];
-// docs/plans/review-v2/thorough-review.md D6: two arms of a full review with one pass. lenses3 and runs3 win. The caller checks the run
+// The pass label in the mark event, the gap lines, and the raw output.
+export const passLabel = (lens: Lens) =>
+  ({ failure: "failure paths", contract: "contracts and callers", system: "the whole change" })[lens];
+// The lens of each finder pass of a full review. Empty: one pass with no lens.
+export const passLenses = (p: Partial<Pick<Profile, "variants">>): Lens[] => (has(p, "lenses3") ? ["failure", "contract", "system"] : []);
+// docs/plans/review-v2/thorough-review.md D6: two arms of a full review with one pass. lenses3 wins. The caller checks the run
 // kind: a re-review, Explain, and every other run kind keep one run.
-export const twice = (p: Partial<Pick<Profile, "variants">>) => has(p, "twice") && passLenses(p).length === 1;
+export const twice = (p: Partial<Pick<Profile, "variants">>) => has(p, "twice") && passLenses(p).length === 0;
 // docs/plans/review-v2/git-history.md section 3.3: the lines of the variant "git-history". rl-main and rl-reviewer get them after
 // ARCHITECTURE_LINES. Line 1 stays under "handoff": it states the purpose of the tools, and gitToolLines states their names and aliases.
 export const gitHistory = (p: Partial<Pick<Profile, "variants">>) => has(p, "git-history");
@@ -1723,7 +1747,7 @@ const QUESTION_RISK_FINDING_LINE =
 // spec.md section 1.6: the rules of rl-verify and rl-verifier. One rubric and one do-not-flag list for both phases.
 // questions: candidates.md holds finder questions. risks: candidates.md holds finder risks.
 export function verifyRules(p: FinderProfile & Pick<Profile, "modules">, c: ReviewContext, questions = false, risks = false): string[] {
-  return [
+  return reasons55(p, [
     "For each candidate, read the code at its anchor and its cause. Then follow its trigger through the code.",
     "Give one entry in verdicts for each candidate.",
     "confirmed: the code shows the trigger and the wrong result.",
@@ -1742,18 +1766,18 @@ export function verifyRules(p: FinderProfile & Pick<Profile, "modules">, c: Revi
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
       : []),
     ...PREEXISTING_VERIFY,
-    // focused-passes.md section 4.5: the L2 pass of lenses3 holds ARCHITECTURE_LINES. runs3 gets no verify lines.
+    // focused-passes.md section 4.5: the L2 pass of lenses3 holds ARCHITECTURE_LINES.
     ...(architecture(p) || has(p, "lenses3") ? ARCHITECTURE_VERIFY : []),
     ...(minorFold(p) ? POLISH_VERIFY : []),
     "Set severity by the rubric below. Lower it for a rare trigger or a small impact.",
     "Raise it only when the code shows a worse result than the candidate says.",
-    ...rubric(p),
+    ...rubric(p).map((l) => (style55(p) && l.startsWith("nit: ") ? VERIFY_NIT_55 : l)),
     "The do-not-flag list:",
     ...DO_NOT_FLAG_ITEMS,
     "Look for no new problems. A finder already ran.",
     ...(questions ? QUESTION_BLOCK_RULES.map((l) => (risks && l === QUESTION_FINDING_LINE ? QUESTION_RISK_FINDING_LINE : l)) : []),
     ...(risks ? [...RISK_BLOCK_RULES, ...(questions ? [] : PLACE_RULES)] : []),
-  ];
+  ]);
 }
 
 export const VERIFY_DELEGATE = [

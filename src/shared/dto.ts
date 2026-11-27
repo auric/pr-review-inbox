@@ -213,12 +213,12 @@ export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
 // docs/plans/review-v2/review-quality-2026.md item 7. "obligations":
 // docs/plans/review-v2/obligations.md WP-OB1. "callers": docs/plans/review-v3.md D2, the caller rule. "minor-fold":
 // docs/plans/review-v2/minor-fold.md WP-MF1. "architecture":
-// docs/plans/review-v2/architecture-bugs.md WP-AR1. "lenses3" and "runs3": docs/plans/review-v2/focused-passes.md WP-L1. "codegraph":
+// docs/plans/review-v2/architecture-bugs.md WP-AR1. "lenses3": docs/plans/review-v2/focused-passes.md WP-L1. "codegraph":
 // docs/plans/review-v3.md WP-V5, an app-run CodeGraph server on the snapshot. "stack": docs/plans/review-v2/stacked-prs.md WP-SK1.
 // "submodules": docs/plans/review-v2/submodule-prs.md WP-SM2. "twice": docs/plans/review-v2/thorough-review.md WP-T1a. "handoff":
-// docs/plans/review-v2/delegation-gaps.md section 3 fixes 1, 3, and 4. "git-history": docs/plans/review-v2/git-history.md WP-GH1. A retired
-// name ("signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check", "broad", "verify2", "security2",
-// "security2-verify", "refute-issue") drops on read. Prompt 2.9 ships "preexisting"
+// docs/plans/review-v2/delegation-gaps.md section 3 fixes 1, 3, and 4. "git-history": docs/plans/review-v2/git-history.md WP-GH1. "style55":
+// docs/plans/review-v2/research/opus55-prompting.md section 8.1. A retired name ("signal", "order", "rules2", "rereview-strict",
+// "preexisting", "risk-check", "broad", "verify2", "security2", "security2-verify", "refute-issue", "runs3") drops on read. Prompt 2.9 ships "preexisting"
 // and "risk-check" as defaults.
 export const VARIANTS = [
   "architecture",
@@ -231,8 +231,8 @@ export const VARIANTS = [
   "minor-fold",
   "obligations",
   "parts",
-  "runs3",
   "stack",
+  "style55",
   "submodules",
   "twice",
 ] as const;

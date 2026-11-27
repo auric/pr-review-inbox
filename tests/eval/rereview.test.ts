@@ -622,7 +622,7 @@ describe("eval:local re-review cases", () => {
     const strict = await bun([RUN, "--set", "local", "--rereview", "--variants", "rereview-strict"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(strict.code).toBe(2);
     expect(strict.stderr).toContain(
-      "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, runs3, stack, submodules, twice.",
+      "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, stack, style55, submodules, twice.",
     );
     const plan = await bun([RUN, "--set", "local", "--rereview", "--variants", "obligations"], { REVIEW_LOOP_EVAL_LOCAL: OUT });
     expect(plan.code).toBe(2);

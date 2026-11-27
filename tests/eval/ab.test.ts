@@ -584,7 +584,7 @@ describe("eval:ab arguments", () => {
     ])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, runs3, stack, submodules, twice.",
+          "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, stack, style55, submodules, twice.",
         ),
       });
   });

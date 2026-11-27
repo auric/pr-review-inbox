@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Ihor Lifanov
 
-// docs/plans/review-v2/focused-passes.md WP-L1: the opt-in variants "lenses3" and "runs3". Pure parts, then review runs with the fake
+// docs/plans/review-v2/focused-passes.md WP-L1: the opt-in variant "lenses3". The control "runs3" was removed on 2026-11-27. Pure parts, then review runs with the fake
 // CLI, a temp git remote, and a temp data folder. No test starts the real CLI.
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -145,7 +145,7 @@ function defaultBytes() {
   };
 }
 
-describe("variants lenses3 and runs3: prompts (focused-passes.md WP-L1)", () => {
+describe("variant lenses3: prompts (focused-passes.md WP-L1)", () => {
   test("without the variants, every prompt, the stdin, both schemas, and candidates.md keep the bytes of main", () => {
     expect(defaultBytes()).toEqual({
       agents: "ef2425086d5d5a9675e0bc1f6da32165cb0b074200ff88df6f0e10eee7db9148",
@@ -154,7 +154,7 @@ describe("variants lenses3 and runs3: prompts (focused-passes.md WP-L1)", () => 
       candidates: "d80a93c3b1ebd4eb0d7857f3b53bd99eea168143571c4ce11d9511f4c373b32d",
     });
     for (const p of SHIPPED_PROFILES) {
-      expect(passLenses(p)).toEqual([null]);
+      expect(passLenses(p)).toEqual([]);
       for (const c of [NO_CONTEXT, FULL]) {
         expect(mainAgent(p, c, null)).toEqual(mainAgent(p, c));
         expect(reviewerAgent(p, c, true, null)).toEqual(reviewerAgent(p, c, true));
@@ -162,28 +162,19 @@ describe("variants lenses3 and runs3: prompts (focused-passes.md WP-L1)", () => 
     }
   });
 
-  test("runs3 changes no prompt; lenses3 changes the finder lens and the verify lines only; the version names the variant", () => {
+  test("lenses3 changes the finder lens and the verify lines only; the version names the variant", () => {
     for (const p of SHIPPED_PROFILES)
       for (const c of [NO_CONTEXT, FULL]) {
-        const r = withV(p, "runs3");
-        expect(passLenses(r)).toEqual([null, null, null]);
-        expect(mainAgent(r, c)).toEqual(mainAgent(p, c));
-        expect(reviewerAgent(r, c, true)).toEqual(reviewerAgent(p, c, true));
-        expect(verifyAgent(r, c, true, true, true)).toEqual(verifyAgent(p, c, true, true, true));
-        expect(verifierAgent(r, c, true, true)).toEqual(verifierAgent(p, c, true, true));
-        expect(salvageAgent(r)).toEqual(salvageAgent(p));
         const l = withV(p, "lenses3");
         expect(passLenses(l)).toEqual(LENSES);
-        expect(passLenses(withV(p, "runs3", "lenses3"))).toEqual(LENSES);
         expect(salvageAgent(l)).toEqual(salvageAgent(p));
-        // focused-passes.md section 4.5: the L2 candidates need the verify lines of "architecture". runs3 gets none.
+        // focused-passes.md section 4.5: the L2 candidates need the verify lines of "architecture".
         for (const a of [verifyAgent(l, c, true, true, true), verifierAgent(l, c, true, true)])
           expect(at(lines(a.prompt), ARCHITECTURE_VERIFY)).toBeGreaterThan(-1);
-        for (const a of [verifyAgent(r, c, true, true, true), verifierAgent(r, c, true, true)])
+        for (const a of [verifyAgent(p, c, true, true, true), verifierAgent(p, c, true, true)])
           for (const x of ARCHITECTURE_VERIFY) expect(lines(a.prompt)).not.toContain(x);
       }
     expect(promptVersion(withV(general, "lenses3"))).toBe(`${REVIEW_PROMPT_VERSION}+lenses3`);
-    expect(promptVersion(withV(general, "runs3"))).toBe(`${REVIEW_PROMPT_VERSION}+runs3`);
   });
 
   test("each lens sits in the slot of the caller lines in rl-main and rl-reviewer; only the block differs", () => {
@@ -229,7 +220,6 @@ describe("variants lenses3 and runs3: prompts (focused-passes.md WP-L1)", () => 
       expect(own.join("\n")).not.toMatch(/\b(CRITICAL|MUST|IMPORTANT)\b/);
     }
     expect(LENSES.map(passLabel)).toEqual(["failure paths", "contracts and callers", "the whole change"]);
-    expect(passLabel(null)).toBe("repeat");
   });
 });
 
@@ -364,11 +354,7 @@ async function setup() {
     claudeStream(root, `s${streams++}`, `claude-synthetic/${file}.jsonl`, structured);
   const raw = (file: string) => claudeStream(root, `r${streams++}`, `claude-synthetic/${file}.jsonl`);
   const always = { ...general.reviewer, mode: "always" as const };
-  const profiles: ProfileInput[] = [
-    general,
-    { ...general, id: "lenses3", name: "Lenses", variants: ["lenses3"], reviewer: always },
-    { ...general, id: "runs3", name: "Runs", variants: ["runs3"], reviewer: always },
-  ];
+  const profiles: ProfileInput[] = [general, { ...general, id: "lenses3", name: "Lenses", variants: ["lenses3"], reviewer: always }];
   const dir = join(root, "data");
   writeConfig(dir, { baseUrl: "http://127.0.0.1:9", userSlug: FAKE_USER, notifications: false, markAi: false, profiles });
   const secrets = createSecrets(null);
@@ -511,7 +497,7 @@ describe("passes in a review run (focused-passes.md sections 4.2 to 4.9)", () =>
   );
 
   test(
-    "runs3: three finder calls with byte-identical prompts and no ARCHITECTURE_VERIFY; above 12 candidates the check gets the group line",
+    "lenses3: above 12 candidates in the union, the check gets the group line",
     async () => {
       const h = await setup();
       const six = (tag: string) => FLUSH.map((_, i) => F(i + 1, `${tag} line ${i + 1}.`));
@@ -525,26 +511,12 @@ describe("passes in a review run (focused-passes.md sections 4.2 to 4.9)", () =>
           ],
         },
       });
-      const id = h.start("runs3");
-      const d = await h.done(id);
+      const id = h.start("lenses3");
+      await h.done(id);
       expect(kinds(h)).toEqual(["find", "find", "find", "verify"]);
-      const [a, b, c] = h.finders() as [Call, Call, Call];
-      for (const x of [b, c]) {
-        expect(x.agents).toEqual(a.agents);
-        expect(x.stdin).toBe(a.stdin);
-        expect(flag(x.argv, "--json-schema")).toBe(flag(a.argv, "--json-schema"));
-      }
       const v = h.calls().find(h.isVerify) as Call;
       expect(v.context["candidates.md"]?.match(/^## Candidate \d+$/gm)).toHaveLength(18);
-      const main = lines(v.agents["rl-main"]?.prompt ?? "");
-      expect(main).toContain(VERIFY_GROUP);
-      for (const x of ARCHITECTURE_VERIFY) expect(main).not.toContain(x);
-      expect(d.events.filter((e) => e.tool === "Pass").map((e) => e.note)).toEqual([
-        "Pass 1 of 3: repeat.",
-        "Pass 2 of 3: repeat.",
-        "Pass 3 of 3: repeat.",
-      ]);
-      expect(h.version(id)).toBe(`${REVIEW_PROMPT_VERSION}+runs3`);
+      expect(lines(v.agents["rl-main"]?.prompt ?? "")).toContain(VERIFY_GROUP);
     },
     SLOW,
   );

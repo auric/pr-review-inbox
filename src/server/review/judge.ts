@@ -1258,7 +1258,7 @@ export function salvaged(f: Found, o: RunOutcome, line: string): Found {
 // docs/plans/review-v2/focused-passes.md section 4.4: one Found from the usable passes of a multi-pass review, in pass order. list: at
 // least one entry. n: the pass count. gaps: the app lines of the failed and skipped passes. events: the events of all passes.
 export function mergeFound(
-  list: { k: number; lens: Lens | null; found: Found }[],
+  list: { k: number; lens: Lens; found: Found }[],
   n: number,
   extra: { gaps: string[]; events: RunEvent[] },
 ): Found {

@@ -99,6 +99,8 @@ The checks add checklists to the review: Security, Threads and races, Performanc
 
 "Thorough review" is off by default. With it on, a full review runs twice at once and merges the findings. When both runs raise the same point, the app shows it once and hides the other copy. Run setup shows "Thorough review: 2 runs at once" and the number of hidden copies. It uses about twice the Claude usage. A re-review, Explain, and every other run kind run once.
 
+"Git history" is off by default. With it on, a review run reads the commits that wrote the changed lines, and their commit subjects. It reports a change that brings back a problem that an earlier commit fixed. It works best with a Jira MCP server in the profile. Explain does not use it.
+
 ![Settings, Review profiles: the prompt, the checks, and the volume](docs/screenshots/settings-profiles.webp)
 
 The review brief holds the task, your note, the checks, and the volume: "Only what matters", "Balanced", or "Show everything". A change of a check or of the volume saves to the profile at once. The profile picker shows when you have two or more review profiles. Explain has its own page. A review starts only from the brief.

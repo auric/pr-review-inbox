@@ -14,10 +14,11 @@ The command builds the local set from the data folder of the app into `eval-loca
 - `classes` (docs/plans/review-v2/review-quality-2026.md item 7): rl-main and rl-reviewer get a list of the bug kinds that authors fix most often, after the profile prompt. The list ends with "Report other problems too." The variant changes the finder, so `--candidate-replay` refuses it. Example: `--candidate-variants classes --candidate-repeat 2 --clean 8`.
 - `obligations` (docs/plans/review-v2/obligations.md): the verify phase lists at most 5 obligations of the change and checks each one. It also starts with zero blocks. A missing obligation with an app-checked cite becomes a finding of category obligation. The variant changes only the verify prompts and the verify schema, so `--candidate-replay` can test it. A replay runs each verify call live, also one with the obligations schema. A run file holds the obligation counts, never the obligation text.
 - `architecture` (docs/plans/review-v2/architecture-bugs.md): rl-main and rl-reviewer compare each new call, state, or handler with the way the repository does it elsewhere. They report a skipped step only with a concrete input and a wrong result. The verify phase refutes a different way that gives the same result. The variant changes the finder, so `--candidate-replay` refuses it.
-- `lenses3` and `runs3` (docs/plans/review-v2/focused-passes.md): a full review runs three finder passes in sequence, then one verify phase over the union. Under `lenses3`, pass 1 looks at failure paths, pass 2 at contracts and callers, and pass 3 at the whole change, and the verify phase also gets the lines of `architecture`. Under `runs3`, the three passes get the same prompts. A re-review keeps one pass. Both variants change the finder, so `--candidate-replay` refuses them. See "Finder passes".
+- `lenses3` (docs/plans/review-v2/focused-passes.md): a full review runs three finder passes in sequence, then one verify phase over the union. Pass 1 looks at failure paths, pass 2 at contracts and callers, and pass 3 at the whole change, and the verify phase also gets the lines of `architecture`. A re-review keeps one pass. It changes the finder, so `--candidate-replay` refuses it. Its control `runs3` was removed on 2026-11-27, because it never ran. See "Finder passes".
 - `codegraph` (docs/plans/review-v3.md WP-V5): a review run indexes repo/ of the snapshot with the installed `codegraph` executable. The agents of the run get its read-only tools and one line that asks for the callers and dependents of each changed symbol. The index time counts in the run minutes. `bun run eval -- --real` with this variant exits with code 2 when `codegraph` is not on PATH. The variant changes the finder, so `--candidate-replay` refuses it. See "CodeGraph".
 - `handoff` (docs/plans/review-v2/delegation-gaps.md section 3, fixes 1, 3, and 4): it changes only a delegating run. rl-reviewer gets the trigger search, a question line, a risks line, and the rl-git tool lines, and its issue lines name the context files. rl-main copies the questions and risks of each call and checks each acceptance criterion against the merged findings. Measure it on the large cases only. The variant changes the finder, so `--candidate-replay` refuses it.
 - `git-history` (docs/plans/review-v2/git-history.md): rl-main and rl-reviewer get a history rule. They call git_log since BASE, git_blame at BASE on the lines that the change rewrites, and git_show only for a commit whose subject names a fix, a revert, or a reason. They report a change that brings back a problem that an earlier commit fixed. The variant changes the finder, so `--candidate-replay` refuses it.
+- `style55` (docs/plans/review-v2/research/opus55-prompting.md sections 7 and 8.1): the verify phase gets a nit line without "Give no nits" (B1). rl-main, rl-reviewer, and salvage get the pre-existing lines right after "Report only problems that the change adds" (B2). Seven main finder and verify rules get a one-sentence reason. It changes the finder, so `--candidate-replay` refuses it. See P-55 in that note.
 - `parts`: see "Part files". `failures`: a trial module with a failure checklist.
 - The variants `signal`, `order`, `rules2`, and `rereview-strict` are removed. The first three lost in U-V1 (docs/eval/results.md). U-V1 gave no decision for `rereview-strict`, and no plan uses it. A saved profile that still lists one loads without it. `--variants` and `--candidate-variants` refuse them. No run reads `REVIEW.md` now.
 - The output names no case. It shows `case 1`, `case 2`, and so on. The result files keep the case IDs.
@@ -229,7 +230,7 @@ Each run records two more facts:
 
 The tables show "part files per case" and "parts read" next to "rl-reviewer calls per case". A result file from before these facts shows "-".
 
-## Finder passes (variants lenses3 and runs3)
+## Finder passes (variant lenses3)
 
 Each finding item of a multi-pass run holds its pass as `pass`, from 1. A one-pass run has no `pass`.
 
@@ -254,15 +255,12 @@ bun run eval -- --set probe --variants lenses3 --repeat 1 --real --out eval-resu
 bun run eval:compare -- <probe-base result.json> <probe-lenses3 result.json>
 ```
 
-The candidate runs against SG-A. Run runs3 only when gate G-L0 passes:
+The candidate runs against SG-A. G-L0 failed, so the control runs3 did not run and was removed:
 
 ```
-bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants runs3 --candidate-repeat 2 --review-only --results eval-results/seeded/runs3
 bun run eval:ab -- --seeded --baseline eval-results/seeded/baseline --candidate-variants lenses3 --candidate-repeat 2 --review-only --results eval-results/seeded/lenses3
 REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/lenses3/review-candidate --real
-REVIEW_LOOP_EVAL_LOCAL=eval-seeds/set bun run eval:label -- eval-results/seeded/runs3/review-candidate --real
-bun run eval:seed -- leaks <each candidate result.json>
-bun run eval:compare -- <runs3 candidate result.json> <lenses3 candidate result.json>
+bun run eval:seed -- leaks <candidate result.json>
 ```
 
 ## CodeGraph

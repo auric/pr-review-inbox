@@ -1021,8 +1021,8 @@ describe("review v3 prompt switches", () => {
       "minor-fold",
       "obligations",
       "parts",
-      "runs3",
       "stack",
+      "style55",
       "submodules",
       "twice",
     ]);
@@ -1033,7 +1033,7 @@ describe("review v3 prompt switches", () => {
     // The retired names drop like any unknown name.
     const retired = ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"];
     // Removed 2026-11-27 after their gates failed. A stored profile with one of them still loads.
-    retired.push("broad", "verify2", "security2", "security2-verify", "refute-issue");
+    retired.push("broad", "verify2", "security2", "security2-verify", "refute-issue", "runs3");
     expect(profileInput.parse({ ...old, variants: ["callers", ...retired, "bogus", 7, "architecture", "callers"] }).variants).toEqual([
       "architecture",
       "callers",
@@ -1047,7 +1047,6 @@ describe("review v3 prompt switches", () => {
       withVariants("minor-fold"),
       withVariants("architecture"),
       withVariants("lenses3"),
-      withVariants("runs3"),
       withVariants("codegraph"),
       withVariants("handoff"),
       withVariants("git-history"),
