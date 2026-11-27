@@ -234,6 +234,9 @@ describe("resumeRefusal", () => {
     expect(refused({ fingerprint: `${"f".repeat(63)}0` })).toBe(`${it} set fingerprint ffffffffffff, but this run has ffffffffffff.`);
     expect(refused({ profile: { id: "general", name: "Review", revision: `${"a".repeat(63)}0` } })).toContain("profile revision");
     expect(refused({ promptVersion: "2.8" })).toBe(`${it} prompt version 2.7, but this run has 2.8.`);
+    // A saved result with a variant removed on 2026-11-27 gives a refusal, not a throw.
+    const removed = { ...saved(), promptVersion: "2.7+verify2", profile: { ...saved().profile, variants: ["verify2"] } };
+    expect(resumeRefusal(removed, now(), ["a", "b"])).toBe(`${it} prompt version 2.7+verify2, but this run has 2.7.`);
     expect(refused({ profileVersion: 10 })).toContain(`${it} profile version 9`);
     expect(refused({ profile: { id: "general", name: "Review", revision: "b".repeat(64) } })).toContain(
       `${it} profile revision aaaaaaaaaaaa`,

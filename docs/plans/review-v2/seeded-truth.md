@@ -163,7 +163,7 @@ Decided by the user on 2026-11-22 (section 14 row 25). The natural set has too f
 - Count and power: no quota. The floor of 4 warns only (section 14 row 13). At 4 to 7 seeds the security row is descriptive only, as the architecture row (architecture-bugs.md section 3.2). A gain of "security2" on the whole set must pass the section 6.5 rules.
 - Yield: unverified (U10). If the kind stays under 4, run `propose --cases <hosts with spare capacity> --kinds security --real`.
 - A store that already has `eval-seeds/sample.json` draws no new sample. Its security seeds then are an unsampled kind: decide each one with `decide`.
-- The candidate run: `--candidate-variants security2` on the seeded set against SG-A, and `security2-verify` as a replay first (review-quality-2026.md section 10).
+- The candidate run: `--candidate-variants security2` on the seeded set against SG-A, and `security2-verify` as a replay first (review-quality-2026.md section 10). Both variants were removed on 2026-11-27. The kind stays for the next security candidate.
 
 ## 5. Making and checking seeds (Q3)
 

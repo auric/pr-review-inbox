@@ -35,8 +35,8 @@ const ALL = [...ARCHITECTURE_LINES, ...ARCHITECTURE_VERIFY];
 const finders = (p: Shipped, c: ReviewContext) => [mainAgent(p, c), reviewerAgent(p, c), reviewerAgent(p, c, true)];
 const verifiers = (p: Shipped, c: ReviewContext) => [
   verifyAgent(p, c),
-  verifyAgent(p, c, true, [], true, true),
-  verifierAgent(p, c, true, [], true),
+  verifyAgent(p, c, true, true, true),
+  verifierAgent(p, c, true, true),
 ];
 // Index of the first line of block in l, or -1. The block must be contiguous.
 const at = (l: string[], block: readonly string[]) => l.findIndex((_, i) => block.every((x, j) => l[i + j] === x));

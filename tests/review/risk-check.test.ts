@@ -253,7 +253,7 @@ describe("verifier lines (AC-R42)", () => {
       for (const l of own) expect(lines(a.prompt)).not.toContain(l);
     }
     for (const q of [false, true]) {
-      for (const a of [verifyAgent(general, GOAL, q, [], true), verifierAgent(general, GOAL, q, [], true)]) {
+      for (const a of [verifyAgent(general, GOAL, q, true), verifierAgent(general, GOAL, q, true)]) {
         for (const l of RISK_BLOCK_RULES) expect(lines(a.prompt)).toContain(l);
         expect(a.prompt.indexOf(RISK_BLOCK_RULES[0] as string)).toBeGreaterThan(a.prompt.indexOf("Look for no new problems."));
         // Rule 16: the place rules, once, also in a file with no question.
@@ -261,16 +261,16 @@ describe("verifier lines (AC-R42)", () => {
       }
     }
     // Rule 17: with questions, the question line names the risk too.
-    const both = lines(verifyAgent(general, GOAL, true, [], true).prompt);
+    const both = lines(verifyAgent(general, GOAL, true, true).prompt);
     expect(both).toContain(
       "Never give duplicate for a question. Set finding to null in every verdict, except confirmed for a question or a risk.",
     );
     expect(both).not.toContain(QUESTION_BLOCK_RULES.at(-1) as string);
     expect(both.indexOf(RISK_BLOCK_RULES[0] as string)).toBeGreaterThan(both.indexOf(QUESTION_BLOCK_RULES[0] as string));
     // Risks only: no question line at all.
-    expect(verifyAgent(general, GOAL, false, [], true).prompt).not.toContain("Set finding to null");
+    expect(verifyAgent(general, GOAL, false, true).prompt).not.toContain("Set finding to null");
     // A confirmed risk needs finding, also from rl-verifier.
-    expect(verifierAgent(general, GOAL, false, [], true).prompt.endsWith(FINDING_LINE)).toBe(true);
+    expect(verifierAgent(general, GOAL, false, true).prompt.endsWith(FINDING_LINE)).toBe(true);
     expect(RISK_BLOCK_RULES).toContain("Find the code with the codegraph tools when the run has them, else with Grep.");
     // The user's answer to question 7: the stale-text rule names its limits and its severity.
     expect(RISK_BLOCK_RULES.slice(-3)).toEqual([
@@ -281,10 +281,10 @@ describe("verifier lines (AC-R42)", () => {
   });
 
   test("above VERIFY_SPLIT, the delegation names the risks; ASD-STE100 holds for each new line", () => {
-    const split = withVerifyDelegation(verifyAgent(general, GOAL, true, [], true), true, true, false, true).prompt;
+    const split = withVerifyDelegation(verifyAgent(general, GOAL, true, true), true, true, false, true).prompt;
     expect(split.endsWith([...VERIFY_DELEGATE, VERIFY_DELEGATE_QUESTIONS, VERIFY_DELEGATE_RISKS].join("\n"))).toBe(true);
     expect(VERIFY_DELEGATE_RISKS).toBe("Give the risks to the rl-verifier agent too. Each risk counts as one candidate of its call.");
-    const risksOnly = withVerifyDelegation(verifyAgent(general, GOAL, false, [], true), true, false, false, true).prompt;
+    const risksOnly = withVerifyDelegation(verifyAgent(general, GOAL, false, true), true, false, false, true).prompt;
     expect(risksOnly.endsWith([...VERIFY_DELEGATE, VERIFY_DELEGATE_RISKS].join("\n"))).toBe(true);
     expect(withVerifyDelegation(verifyAgent(general, GOAL, true), true, true).prompt).not.toContain(VERIFY_DELEGATE_RISKS);
     const added = lines(split).filter((l) => !lines(withVerifyDelegation(verifyAgent(general, GOAL, true), true, true).prompt).includes(l));

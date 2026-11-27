@@ -432,7 +432,7 @@ function ground(c: EvalCaseInfo, r: CaseRun, volume: Volume | null, g: Grounding
   const shown = r.items.flatMap((i, n) => (i.group === "main" ? [{ i, gold: labels[n] ?? null }] : []));
   const unmatched = shown.filter((x) => x.gold === null).map((x) => ({ i: x.i, j: g.judge(c, x.i) }));
   const judged = unmatched.every((x) => x.j !== undefined);
-  // The exact category text, as the verify rules of catalog.ts SECURITY2 and judge.ts answerFinding write it.
+  // The exact category text, as judge.ts answerFinding writes it.
   const ofCategory = (category?: string): Omit<Sec, "runs"> => {
     const is = (i: EvalItem) => category === undefined || i.category === category;
     const un = unmatched.filter((x) => is(x.i));

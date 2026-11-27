@@ -121,8 +121,8 @@ function defaultBytes(p: (s: Shipped) => Shipped) {
         mainAgent(q, c).prompt,
         reviewerAgent(q, c).prompt,
         reviewerAgent(q, c, true).prompt,
-        verifyAgent(q, c, true, [], true, true).prompt,
-        verifierAgent(q, c, true, [], true).prompt,
+        verifyAgent(q, c, true, true, true).prompt,
+        verifierAgent(q, c, true, true).prompt,
         salvageAgent(q).prompt,
       );
     }

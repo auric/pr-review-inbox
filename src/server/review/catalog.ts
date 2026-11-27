@@ -30,7 +30,6 @@ import {
 } from "../../shared/task";
 import { type AgentSpec, EXPLORER_AGENT, type McpServerSpec, NAME } from "./claude";
 import type { DiffFile } from "./diffmap";
-import { type Language, languageSkipLines } from "./languages";
 import { SKILL_INDEX, SKILL_INDEX_AFTER } from "./skills";
 
 // login: `claude auth login --help` (CLI 2.1.295) names --claudeai for the subscription.
@@ -242,7 +241,7 @@ export const profileRevision = (p: Profile) =>
     .update(p.variants.length ? `variants${JSON.stringify(p.variants)}` : "")
     .update(p.jiraFamily ? "jirafamily" : "")
     .digest("hex");
-// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.8+broad+verify2".
+// docs/plans/review-v3.md WP-V2: a review run records its variants after the prompt version, sorted, such as "2.9+architecture+callers".
 export const promptVersion = (p: Pick<Profile, "variants">) => [REVIEW_PROMPT_VERSION, ...[...p.variants].sort()].join("+");
 // docs/plans/review-v2/spec.md section 0 and design.md R8: in mode auto, a smaller change gets no Agent tool.
 export const REVIEWER_MIN_LINES = 1200;
@@ -736,17 +735,6 @@ const doNotFlag = (p: FinderProfile) => [
     : "Do not report the points below. They only cost the user time:",
   ...DO_NOT_FLAG_ITEMS,
 ];
-// docs/plans/review-v2/review-quality-2026.md item 3: under "broad", the verify phase applies the do-not-flag lists, not the finder.
-// With the verify phase off, nothing else applies them, so the finder keeps them.
-export const broad = (p: FinderProfile) => checked(p) && has(p, "broad");
-const finderList = (p: FinderProfile) => (broad(p) ? [] : doNotFlag(p));
-const CLAIM = "A comment in a thread that says the code is right, or that a case is handled, is a claim.";
-export const BROAD_THREAD_CLAIM = {
-  checked: `${CLAIM} It is no reason to leave out a finding. The check step tests the claim.`,
-  unchecked: `${CLAIM} Check it in ./repo before you leave out a finding.`,
-};
-const threadClaim = (p: FinderProfile, c: RunFiles) =>
-  c.prContext && has(p, "broad") ? [checked(p) ? BROAD_THREAD_CLAIM.checked : BROAD_THREAD_CLAIM.unchecked] : [];
 // docs/plans/review-v2/review-quality-2026.md item 7: the finder lines of the "classes" variant. They stay out of REVIEW_LENS, because
 // an edit of REVIEW_LENS changes profileRevision.
 export const CLASSES_LINES = [
@@ -975,45 +963,11 @@ export const MODULES: Record<ModuleId, { label: string; lines: string[] }> = {
 // spec.md section 1.3: rules needs project instructions, and intent needs a goal. Else the section adds nothing.
 const lacks = (id: ModuleId, c: ReviewContext) => (id === "rules" && !c.instructions) || (id === "intent" && !c.goal);
 
-// docs/plans/review-v2/review-quality-2026.md item 10: the lines of the "security2" variant, adapted from
-// anthropics/claude-code-security-review (MIT, third-party-licenses/prompts/). They stay out of MODULES, because an edit of
-// MODULES[*].lines changes profileRevision. finder: added to the security section. verify: rules of the verify phase.
-export const SECURITY2 = {
-  finder: [
-    "Check XML parsing with external entities, template injection, unsafe deserialization, and path traversal in file access.",
-    "Check server-side requests whose host or protocol comes from input.",
-    "Check JWT handling and session management for flaws.",
-    "Check privilege escalation: a path that lets a user act with rights that the user does not have.",
-    "Check weak or self-made cryptography, weak random values for secrets, and certificate checks that the code turns off.",
-    "Check that logs and error messages show no secrets, passwords, request headers, or personal data.",
-    "In trigger of a security finding, name the untrusted source, the path through the code, and the sink.",
-  ],
-  verifyHead: "For a candidate with the category security, also apply these rules:",
-  verify: [
-    "A security claim holds only when an untrusted source reaches the sink on a path in this code.",
-    "Name the source, the path, and the sink in reason.",
-    "These sources are trusted: environment variables, command-line flags, and the config of the operator.",
-    "A UUID is not guessable. A claim that needs a guessed UUID does not hold.",
-    "Framework escaping, such as React text output, stops cross-site scripting. Only a raw HTML call, such as dangerouslySetInnerHTML, can fail.",
-    "Client-side code is no trust boundary. A missing permission check in client-side code is no security hole.",
-    "A claim about code that only tests use does not hold.",
-    "A race that no practical timing can trigger does not hold.",
-    "An outdated library version is out of scope. It does not hold.",
-    "User input inside an AI prompt is no security hole by itself.",
-    "Refute a security claim that does not hold, and name the rule in reason.",
-    "Some security candidates show a real defect that is no security hole.",
-    "Examples: a leak, a crash, unbounded load, or a missing rate limit.",
-    "Never refute such a candidate because it is no security hole. Confirm or refute that defect by its trigger.",
-    "Set severity by the rubric below for that defect. In reason, write that it is no security hole.",
-  ],
-};
-const security2Verify = (p: Partial<Pick<Profile, "variants">>) => has(p, "security2") || has(p, "security2-verify");
-
 // The sections in MODULE_IDS order, so the click order of the checkboxes does not change the prompt.
-export function moduleSections(p: Pick<Profile, "modules"> & Partial<Pick<Profile, "variants">>, c: ReviewContext): string[] {
+export function moduleSections(p: Pick<Profile, "modules">, c: ReviewContext): string[] {
   return MODULE_IDS.filter((id) => p.modules.includes(id) && !lacks(id, c)).flatMap((id) => [
     `Check section ${id}:`,
-    ...[...MODULES[id].lines, ...(id === "security" && has(p, "security2") ? SECURITY2.finder : [])].map((l) => `- ${l}`),
+    ...MODULES[id].lines.map((l) => `- ${l}`),
   ]);
 }
 
@@ -1116,7 +1070,7 @@ export const sharedRules = (p: Pick<Profile, "explain" | "docs"> & FinderProfile
     : [
         ...contextBlock({ ...NO_CONTEXT, taskFile: true, attachments: true, history: true, questions: true }),
         ...finderRules(p, true),
-        ...finderList(p),
+        ...doNotFlag(p),
         ...rubric(p),
         COVERAGE_RULE,
         ...docsRule(p),
@@ -1158,8 +1112,7 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT, lens: Lens 
       ...contextBlock(c),
       ...finderRules(p, true, c),
       ...focus(p, lens),
-      ...finderList(p),
-      ...threadClaim(p, c),
+      ...doNotFlag(p),
       ...rubric(p),
       ...moduleSections(p, c),
       ...(c.questions ? ANSWERED_RULES : []),
@@ -1649,8 +1602,7 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       ...(handoff(p) ? gitToolLines(c.rereview) : []),
       ...finderRules(p, false, c),
       ...focus(p, lens),
-      ...finderList(p),
-      ...threadClaim(p, c),
+      ...doNotFlag(p),
       ...rubric(p),
       ...moduleSections(p, c),
       ...docsRule(p),
@@ -1674,16 +1626,8 @@ const VERIFY_OPENING = [
   './context/candidates.md lists the findings. The heading "## Candidate N" holds candidate N.',
 ];
 
-// docs/plans/review-v2/review-quality-2026.md item 4: the verify lines of the "verify2" variant.
-export const VERIFY2 = {
-  duplicate:
-    "duplicate: another candidate of the same group describes the same problem. Two candidates describe the same problem when one fix would fix both.",
-  thread:
-    "A thread comment that says the code is right, or that a case is handled, is a claim. Refute a candidate on such a claim only when the code shows that the claim holds. Name that code in reason.",
-  intent:
-    "For a candidate of module intent, find the requirement in ./context/task.md, ./context/pr.md, or an issue tool result. Refute it when no task text states the requirement. Name the source of the requirement in reason.",
-  group: "Give the candidates of one group to the same call.",
-};
+// focused-passes.md section 4.5: the delegation line of a run with two or more finder passes.
+export const VERIFY_GROUP = "Give the candidates of one group to the same call.";
 
 // docs/plans/review-v2/review-questions.md: the "## Question N" blocks of candidates.md. Only a file with questions gets these lines.
 export const QUESTION_BLOCK_RULES = [
@@ -1776,32 +1720,9 @@ const QUESTION_FINDING_LINE = QUESTION_BLOCK_RULES.at(-1) as string;
 const QUESTION_RISK_FINDING_LINE =
   "Never give duplicate for a question. Set finding to null in every verdict, except confirmed for a question or a risk.";
 
-// docs/plans/review-v2/verifier-rule.md section 4.2: the verify lines of the variant "refute-issue". They narrow the refuted line of
-// verifyRules and do not replace it. Only rl-verify and rl-verifier get them, so a replay can test them.
-export const refuteIssue = (p: Partial<Pick<Profile, "variants">>) => has(p, "refute-issue");
-export const REFUTE_ISSUE_VERIFY = [
-  "Judge the problem of each candidate. The problem is the defect that the candidate names, at its anchor or its cause.",
-  "The trigger, the input, the caller, the values, and the fix direction are details. A wrong detail does not refute the problem.",
-  "Never refute a candidate only because its stated trigger cannot happen. Look for another trigger of the same defect.",
-  "When you find one, give confirmed. In reason, name the wrong detail, and give the right trigger with path:line.",
-  "Set severity by the trigger and the wrong result that you found.",
-  "When no trigger reaches a wrong result, give refuted. A guard refutes a candidate only when it stops each trigger.",
-  "Another defect is another problem, also at the same lines. Never confirm a candidate for another problem.",
-  'Never refute a candidate as "a choice between two correct designs" when it names a case with a wrong result. Check that case.',
-  "A wrong detail is no reason for unsure.",
-];
-
 // spec.md section 1.6: the rules of rl-verify and rl-verifier. One rubric and one do-not-flag list for both phases.
-// questions: candidates.md holds finder questions. langs: the languages of the change, for the skip lists under "broad". risks:
-// candidates.md holds finder risks.
-export function verifyRules(
-  p: FinderProfile & Pick<Profile, "modules">,
-  c: ReviewContext,
-  questions = false,
-  langs: Language[] = [],
-  risks = false,
-): string[] {
-  const v2 = has(p, "verify2");
+// questions: candidates.md holds finder questions. risks: candidates.md holds finder risks.
+export function verifyRules(p: FinderProfile & Pick<Profile, "modules">, c: ReviewContext, questions = false, risks = false): string[] {
   return [
     "For each candidate, read the code at its anchor and its cause. Then follow its trigger through the code.",
     "Give one entry in verdicts for each candidate.",
@@ -1812,11 +1733,10 @@ export function verifyRules(
     "question: only the author can answer the point, and no file or tool of this run answers it. Write the question in question. In reason, name what you checked.",
     "When the code or the task text answers the point, give confirmed or refuted, not question.",
     "For a candidate without a trigger, look for one. When you find it, give confirmed, and put the trigger into reason.",
-    ...(refuteIssue(p) ? REFUTE_ISSUE_VERIFY : []),
     ...(c.submodules ? SUBMODULE_VERIFY : []),
     ...(c.stack?.parent ? STACK_VERIFY.parent : []),
     ...(c.stack?.children ? STACK_VERIFY.children : []),
-    v2 ? VERIFY2.duplicate : "duplicate: another candidate of the same group describes the same problem at the same place.",
+    "duplicate: another candidate of the same group describes the same problem at the same place.",
     "Set duplicateOf to the clearer candidate.",
     ...(c.history
       ? ['A candidate with the state "discarded by the user" in ./context/history.md is refuted, unless the code at that place changed.']
@@ -1825,15 +1745,11 @@ export function verifyRules(
     // focused-passes.md section 4.5: the L2 pass of lenses3 holds ARCHITECTURE_LINES. runs3 gets no verify lines.
     ...(architecture(p) || has(p, "lenses3") ? ARCHITECTURE_VERIFY : []),
     ...(minorFold(p) ? POLISH_VERIFY : []),
-    ...(v2 && c.prContext ? [VERIFY2.thread] : []),
-    ...(v2 && p.modules.includes("intent") && !lacks("intent", c) ? [VERIFY2.intent] : []),
-    ...(security2Verify(p) ? [SECURITY2.verifyHead, ...SECURITY2.verify.map((l) => `- ${l}`)] : []),
     "Set severity by the rubric below. Lower it for a rare trigger or a small impact.",
     "Raise it only when the code shows a worse result than the candidate says.",
     ...rubric(p),
     "The do-not-flag list:",
     ...DO_NOT_FLAG_ITEMS,
-    ...(broad(p) ? languageSkipLines(langs) : []),
     "Look for no new problems. A finder already ran.",
     ...(questions ? QUESTION_BLOCK_RULES.map((l) => (risks && l === QUESTION_FINDING_LINE ? QUESTION_RISK_FINDING_LINE : l)) : []),
     ...(risks ? [...RISK_BLOCK_RULES, ...(questions ? [] : PLACE_RULES)] : []),
@@ -1850,22 +1766,15 @@ export const VERIFY_DELEGATE_QUESTIONS = `Give the questions to the ${VERIFIER} 
 export const VERIFY_DELEGATE_RISKS = `Give the risks to the ${VERIFIER} agent too. Each risk counts as one candidate of its call.`;
 
 // The main agent of the verify process (spec.md section 1.6). The caller adds skills, MCP tools, and the delegation lines.
-// questions: candidates.md holds finder questions. langs: see verifyRules. risks: candidates.md holds finder risks. obligations: the
-// check of docs/plans/review-v2/obligations.md is on.
-export function verifyAgent(
-  p: Profile,
-  c: ReviewContext = NO_CONTEXT,
-  questions = false,
-  langs: Language[] = [],
-  risks = false,
-  obligations = false,
-): AgentSpec {
+// questions: candidates.md holds finder questions. risks: candidates.md holds finder risks. obligations: the check of
+// docs/plans/review-v2/obligations.md is on.
+export function verifyAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false, risks = false, obligations = false): AgentSpec {
   return {
     description: "Read-only check of the findings of one review.",
     prompt: [
       ...VERIFY_OPENING,
       ...contextBlock(c),
-      ...verifyRules(p, c, questions, langs, risks),
+      ...verifyRules(p, c, questions, risks),
       ...(obligations ? obligationRules(c.history, !(questions || risks)) : []),
       COVERAGE_RULE,
       ...docsRule(p),
@@ -1897,7 +1806,7 @@ export function salvageAgent(p: Profile): AgentSpec {
   };
 }
 
-// The delegation lines come last, as for the finder. questions: candidates.md holds finder questions. group: the "verify2" variant.
+// The delegation lines come last, as for the finder. questions: candidates.md holds finder questions. group: VERIFY_GROUP.
 // risks: candidates.md holds finder risks. obligations: the obligation check is on.
 export const withVerifyDelegation = (
   a: AgentSpec,
@@ -1914,7 +1823,7 @@ export const withVerifyDelegation = (
           a.prompt,
           AGENT_PARAMS_RULE,
           ...VERIFY_DELEGATE,
-          ...(group ? [VERIFY2.group] : []),
+          ...(group ? [VERIFY_GROUP] : []),
           ...(questions ? [VERIFY_DELEGATE_QUESTIONS] : []),
           ...(risks ? [VERIFY_DELEGATE_RISKS] : []),
           ...(obligations ? [VERIFY_DELEGATE_OBLIGATIONS] : []),
@@ -1925,15 +1834,9 @@ export const withVerifyDelegation = (
 // spec.md sections 1.2 and 1.6: the verifier effort null means medium. A null model leaves the agent field out.
 export const verifierEffort = (p: Pick<Profile, "verifier">) => p.verifier.effort ?? "medium";
 
-// The caller adds skills, MCP tools, and the project instructions. questions: candidates.md holds finder questions. langs: see
-// verifyRules. risks: candidates.md holds finder risks. A confirmed risk needs finding, so the report line names it.
-export function verifierAgent(
-  p: Profile,
-  c: ReviewContext = NO_CONTEXT,
-  questions = false,
-  langs: Language[] = [],
-  risks = false,
-): AgentSpec {
+// The caller adds skills, MCP tools, and the project instructions. questions: candidates.md holds finder questions. risks:
+// candidates.md holds finder risks. A confirmed risk needs finding, so the report line names it.
+export function verifierAgent(p: Profile, c: ReviewContext = NO_CONTEXT, questions = false, risks = false): AgentSpec {
   return {
     ...(p.verifier.model !== null && { model: p.verifier.model }),
     effort: verifierEffort(p),
@@ -1942,7 +1845,7 @@ export function verifierAgent(
       ...VERIFY_OPENING,
       "You check the candidates that the request names.",
       ...contextBlock(c),
-      ...verifyRules(p, c, questions, langs, risks),
+      ...verifyRules(p, c, questions, risks),
       COVERAGE_RULE,
       ...docsRule(p),
       questions || risks

@@ -79,7 +79,6 @@ import { recoverTasks, stepAnswers, taskRow } from "../tasks/tasks";
 import { inside, tasksRoot } from "../tasks/worktree";
 import {
   askAgent,
-  broad,
   createDocServers,
   DEFAULT_PROFILE,
   DOCS_RULE,
@@ -193,7 +192,7 @@ import {
   unreadAlways,
   usageOf,
 } from "./judge";
-import { type Language, languagesOf, withLanguages } from "./languages";
+import { languagesOf, withLanguages } from "./languages";
 import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestionsByItem, within } from "./notes";
 import { partFile, partNotes, partsOf, partText } from "./parts";
 import { loadPrContext } from "./pr-context";
@@ -1337,7 +1336,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           ...spec,
           prompt,
           main: withDelegation(
-            withMcp(withSkills(withLanguages(main, langs, !broad(profile)), folders, always), a.used, finder || explain),
+            withMcp(withSkills(withLanguages(main, langs), folders, always), a.used, finder || explain),
             delegate,
             parts.length,
             handoff(profile),
@@ -1356,7 +1355,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                 [REVIEWER]: withInstructions(
                   withInstructions(
                     withMcp(
-                      withSkills(withLanguages(reviewer, langs, !broad(profile)), folders, always),
+                      withSkills(withLanguages(reviewer, langs), folders, always),
                       a.used,
                       finder && (handoff(profile) ? "files" : true),
                     ),
@@ -1399,7 +1398,6 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       used,
       instructions,
       mcpServers,
-      langs,
       gitlinks: subs?.gitlinks,
     };
     const settled = (found: Found, find: RunPhase, v: Exclude<Awaited<ReturnType<typeof verifyPhase>>, Ending>, names = servers) =>
@@ -1807,9 +1805,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       used: McpUse[];
       instructions: { text: string };
       mcpServers: Record<string, McpServerSpec>;
-      // The languages of the finder. Under "broad", the verify phase gets their skip lists.
-      langs: Language[];
-      // focused-passes.md sections 4.5 and 4.3: a run with two or more finder passes. group: VERIFY2.group. findUsage: the usage of all
+      // focused-passes.md sections 4.5 and 4.3: a run with two or more finder passes. group: VERIFY_GROUP. findUsage: the usage of all
       // passes for a cancel, because o holds the result of one pass only.
       group?: boolean;
       findUsage?: RunUsage | null;
@@ -1823,7 +1819,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     | { check: CheckRun | null; verify: boolean; written: number; placed?: Map<number, AnchoredFinding>; obligations?: PlacedObligations }
     | Ending
   > {
-    const { profile, context, folders, always, used, task, langs } = r;
+    const { profile, context, folders, always, used, task } = r;
     const verify = profile.verifier.mode === "on";
     // docs/plans/review-v2/review-questions.md: the finder questions get a check too, also in a run with no finding.
     // docs/plans/review-v2/risk-check.md section 4.2: so do the finder risks, a default since prompt 2.9.
@@ -1859,7 +1855,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       seq: e.seq + offset,
     });
     const verifier = withInstructions(
-      withMcp(withSkills(verifierAgent(profile, context, asked > 0, langs, risks > 0), folders, always, task), used, true),
+      withMcp(withSkills(verifierAgent(profile, context, asked > 0, risks > 0), folders, always, task), used, true),
       r.instructions.text,
     );
     // No await between this check and run(), so a later Cancel reaches the new process.
@@ -1872,10 +1868,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         prompt: buildVerifyPrompt({ ...r.input, count: written, asked, risks, ...(obligations && { obligations }), rereview: r.rereview }),
         schema: verifyJsonSchema(obligations),
         main: withVerifyDelegation(
-          withMcp(withSkills(verifyAgent(profile, context, asked > 0, langs, risks > 0, obligations), folders, always, task), used, true),
+          withMcp(withSkills(verifyAgent(profile, context, asked > 0, risks > 0, obligations), folders, always, task), used, true),
           split,
           asked > 0,
-          profile.variants.includes("verify2") || r.group === true,
+          r.group === true,
           risks > 0,
           obligations,
         ),
@@ -2270,7 +2266,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         prompt: buildPrompt(input),
         schema: reviewJsonSchema(false, minorFold(profile)),
         main: withDelegation(
-          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs, !broad(profile)), folders, always, true), tools.used, true),
+          withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always, true), tools.used, true),
           delegate,
           0,
           handoff(profile),
@@ -2282,11 +2278,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         agents: delegate
           ? {
               [REVIEWER]: withInstructions(
-                withMcp(
-                  withSkills(withLanguages(reviewerAgent(profile, context), langs, !broad(profile)), folders, always, true),
-                  tools.used,
-                  true,
-                ),
+                withMcp(withSkills(withLanguages(reviewerAgent(profile, context), langs), folders, always, true), tools.used, true),
                 instructions.text,
               ),
             }
@@ -2323,7 +2315,6 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           used: tools.used,
           instructions,
           mcpServers,
-          langs,
         });
     if ("status" in v) return v;
     return noted(

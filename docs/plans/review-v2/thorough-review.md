@@ -111,8 +111,8 @@ Facts read from the stored r6 records on 2026-11-25 (estimates, not eval output)
 | Re-review | One run. Two `earlier` verdict lists cannot merge (focused-passes.md section 9). A re-review carries only new and accepted items (rereview.ts:14), so hidden copies never carry. |
 | Explain, Ask, reply, fix, discuss, session, task review | One run. |
 | lenses3, runs3 | Their passes win (jobs.ts:1380). The log says that twice is off for the run. |
-| verify2, refute-issue, security2-verify, obligations | The verify of each arm gets them. |
-| broad, callers, architecture, classes, parts, security2, minor-fold | Both arms get byte-identical prompts. |
+| obligations | The verify of each arm gets it. |
+| callers, architecture, classes, parts, minor-fold | Both arms get byte-identical prompts. |
 | stack, submodules | The context files build once. Arm B gets a copy. |
 | codegraph, a picked codegraph server | Each arm indexes its own repo, so index time doubles. Unverified. Gate T-A runs without it. |
 | Eval replay | Refused, because twice changes the finder (run.ts:301-336). |

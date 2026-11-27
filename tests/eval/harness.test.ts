@@ -199,13 +199,12 @@ describe("eval harness without --real (AC-M2)", () => {
       "effort",
       "reviewer",
     ]);
-    expect(finderChange(base, { ...p.profile, variants: ["broad"] })).toEqual(["variants"]);
+    expect(finderChange(base, { ...p.profile, variants: ["callers"] })).toEqual(["variants"]);
     // focused-passes.md section 5.4: --candidate-replay refuses lenses3 and runs3, because they change the finder.
     expect(finderChange(base, { ...p.profile, variants: ["lenses3"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["runs3"] })).toEqual(["variants"]);
-    // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can switch it.
+    // The removed verify-only variants stay in VERIFY_ONLY, so an old recording with one of them still replays.
     expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "security2-verify", "verify2"]);
-    // verifier-rule.md AC-R58: the rule changes only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["refute-issue"] })).toEqual([]);
     expect(finderChange(base, { ...p.profile, variants: ["refute-issue", "callers"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
@@ -216,8 +215,8 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(callKind({ schema: verifyJsonSchema(true) })).toBe("verify");
     expect(callKind({ schema: reviewJsonSchema() })).toBe("find");
     expect(callKind({})).toBe("find");
-    // review-quality-2026.md item 10: security2 changes the finder, security2-verify only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["security2-verify"] })).toEqual([]);
+    // A removed finder variant in an old recording still counts as a finder change.
     expect(finderChange(base, { ...p.profile, variants: ["security2"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["broad", "verify2"] })).toEqual(["variants"]);
   });
@@ -327,13 +326,14 @@ describe("eval harness without --real (AC-M2)", () => {
       return p.profile;
     };
     expect(parseOptions([])).toMatchObject({ variants: null });
-    expect(parseOptions(["--variants", "verify2, broad"])).toMatchObject({ variants: ["verify2", "broad"] });
+    expect(parseOptions(["--variants", "callers, architecture"])).toMatchObject({ variants: ["callers", "architecture"] });
     // review-quality-2026.md WP-R1: the retired variants are unknown names.
-    for (const bad of ["bogus", "signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check", "broad,", ""])
-      expect(parseOptions(["--variants", bad])).toHaveProperty("error");
+    const retired = ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"];
+    const removed = ["broad", "verify2", "security2", "security2-verify", "refute-issue"];
+    for (const bad of ["bogus", ...retired, ...removed, "callers,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
     expect(profileOf([]).variants).toEqual([]);
-    expect(profileOf(["--variants", "verify2,broad"]).variants).toEqual(["broad", "verify2"]);
-    expect(profileOf(["--variants", "verify2", "--rereview", "--profile-version", "4"]).variants).toEqual(["verify2"]);
+    expect(profileOf(["--variants", "callers,architecture"]).variants).toEqual(["architecture", "callers"]);
+    expect(profileOf(["--variants", "obligations", "--rereview", "--profile-version", "4"]).variants).toEqual(["obligations"]);
   });
 
   test("--modules takes only module IDs of this app version, so a typo never runs a profile without the check", () => {
@@ -353,7 +353,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of architecture, broad, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, refute-issue, runs3, security2, security2-verify, stack, submodules, twice, verify2.",
+        "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, runs3, stack, submodules, twice.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
@@ -862,16 +862,16 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         "--verifier",
         "off",
         "--variants",
-        "verify2,broad",
+        "callers,architecture",
         "--out",
         out,
       ];
       const r = await bun([RUN, ...args, "--runner", process.execPath, FAKE, scenario]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      const version = `${REVIEW_PROMPT_VERSION}+broad+verify2`;
+      const version = `${REVIEW_PROMPT_VERSION}+architecture+callers`;
       expect(r.stdout).toContain(
-        `with variants verify2, broad, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
+        `with variants callers, architecture, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
       );
       expect(r.stdout).not.toContain(DEFAULT_MODEL_WARNING);
       const argv = readRecords<{ argv: string[] }>(record).find((x) => x.argv.includes("-p"))?.argv ?? [];
@@ -881,7 +881,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
       const a = JSON.parse(readFileSync(join(out, files[0] as string), "utf8")) as EvalResult;
       expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off", verifierEffort: "medium", reviewerMode: "auto" });
-      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["broad", "verify2"] });
+      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["architecture", "callers"] });
       expect(a.promptVersion).toBe(version);
       const [run] = a.runs;
       expect(run).toMatchObject({ status: "completed", effort: "low" });
@@ -889,6 +889,14 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(run?.models).toContain(run?.model as string);
 
       expect(compareText(a, a)).not.toContain("used different");
+      // An old result file whose profile names removed variants still reads, scores, and compares.
+      const oldFile = join(dir, "old.json");
+      const oldProfile = { ...a.profile, variants: ["broad", "verify2", "security2", "security2-verify", "refute-issue"] };
+      writeFileSync(oldFile, JSON.stringify({ ...a, promptVersion: `${REVIEW_PROMPT_VERSION}+broad+verify2`, profile: oldProfile }));
+      const old = readResult(oldFile);
+      expect(old.profile.variants).toEqual(oldProfile.variants);
+      expect(score(old)).toEqual(score(a));
+      expect(compareText(old, a)).toContain(`${REVIEW_PROMPT_VERSION}+broad+verify2`);
       const b: EvalResult = {
         ...a,
         requested: { model: "opus", effort: "low" },
@@ -1105,20 +1113,19 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(refusal(["--repeat", "2"])).toContain("the recording has 1 repeats, but this run asks for 2");
       expect(refusal([], { ...a, promptVersion: "2.0" })).toContain("the recording ran finder prompt version 2.0");
       expect(refusal(["--verifier", "off"])).toContain("changes the finder setup of the recording: verifier.");
-      // review-quality-2026.md item 4: verify2 changes only the verify prompts. broad changes the finder.
-      expect(refusal(["--variants", "verify2"])).toBeNull();
-      // verifier-rule.md AC-R58: refute-issue changes only the verify prompts.
-      expect(refusal(["--variants", "refute-issue"])).toBeNull();
-      expect(refusal(["--variants", "broad"])).toContain("the recording ran finder prompt version");
+      // obligations changes only the verify prompts. callers changes the finder.
+      expect(refusal(["--variants", "obligations"])).toBeNull();
+      expect(refusal(["--variants", "callers"])).toContain("the recording ran finder prompt version");
+      // An old recording with a removed verify-only variant replays. One with a removed finder variant is refused.
+      const removed = (v: string) => ({ ...a, promptVersion: `${a.promptVersion}+${v}`, profile: { ...a.profile, variants: [v] } });
+      for (const v of ["verify2", "refute-issue", "security2-verify"]) expect(refusal([], removed(v))).toBeNull();
       // thorough-review.md section 9: twice in the recording or in this run is refused, also when both have it.
       const twice = "a Thorough review (variant twice) cannot replay";
       expect(refusal(["--variants", "twice"])).toContain(twice);
       const twiceRec = { ...a, promptVersion: `${a.promptVersion}+twice`, profile: { ...a.profile, variants: ["twice"] } };
       expect(refusal([], twiceRec)).toContain(twice);
       expect(refusal(["--variants", "twice"], twiceRec)).toContain(twice);
-      expect(refusal(["--variants", "verify2"], { ...a, promptVersion: `${a.promptVersion}+broad` })).toContain(
-        `the recording ran finder prompt version ${a.promptVersion}+broad`,
-      );
+      expect(refusal([], removed("broad"))).toContain(`the recording ran finder prompt version ${a.promptVersion}+broad`);
 
       // A flag that changes the finder exits 2 before any run.
       const flag = await run("flag", [], ["--cases", ids, "--replay-find", rec.file, "--effort", "low"]);

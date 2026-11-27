@@ -1,6 +1,6 @@
 # Verifier rule: refute the problem, not a detail
 
-Status: design of 2026-11-21, made at main 93ff232. Gate VR-0 passed (go, section 6). WP-VR1 is built as an opt-in variant. Gate VR-A is open. The file:line references cite 93ff232. ed9fc03 moved some cited lines down. catalog.ts: +2 after line 1480, so the no-trigger line is catalog.ts:1519. review.ts: +10 after line 195, so `verifyJsonSchema` is review.ts:221. judge.ts: +1 after line 676 and +3 after line 686. The variant "refute-issue" changes only the verify prompts. With the variant off, each prompt byte and each schema byte stays the same. REVIEW_PROMPT_VERSION stays "2.8" until WP-VR2 ships.
+Status: design of 2026-11-21, made at main 93ff232. Gate VR-0 passed (go, section 6). WP-VR1 was built as an opt-in variant. Gate VR-A failed (2026-11-21), and the variant was removed on 2026-11-27. The file:line references cite 93ff232. ed9fc03 moved some cited lines down. catalog.ts: +2 after line 1480, so the no-trigger line is catalog.ts:1519. review.ts: +10 after line 195, so `verifyJsonSchema` is review.ts:221. judge.ts: +1 after line 676 and +3 after line 686. The variant "refute-issue" changes only the verify prompts. With the variant off, each prompt byte and each schema byte stays the same. REVIEW_PROMPT_VERSION stays "2.8" until WP-VR2 ships.
 
 ## 1. Request and verdict
 

@@ -473,8 +473,8 @@ describe("stack, submodules, and twice switches", () => {
     expect(withVariant(["codegraph", "stack", "submodules"], "stack", false)).toEqual(["codegraph", "submodules"]);
     expect(withVariant([], "submodules", false)).toEqual([]);
     expect(withVariant(["submodules"], "submodules", true)).toEqual(["submodules"]);
-    expect(withVariant(["verify2", "stack"], "twice", true)).toEqual(["stack", "twice", "verify2"]);
-    expect(withVariant(["twice", "verify2"], "twice", false)).toEqual(["verify2"]);
+    expect(withVariant(["stack", "callers"], "twice", true)).toEqual(["callers", "stack", "twice"]);
+    expect(withVariant(["twice", "callers"], "twice", false)).toEqual(["callers"]);
   });
 
   test("an edit of the switch saves the server form, so the saved list compares equal", () => {

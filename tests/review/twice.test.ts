@@ -181,7 +181,7 @@ describe("twice (catalog)", () => {
     expect(twice({ variants: [] })).toBe(false);
     expect(twice({ variants: ["lenses3", "twice"] })).toBe(false);
     expect(twice({ variants: ["runs3", "twice"] })).toBe(false);
-    expect(twice({ variants: ["twice", "verify2"] })).toBe(true);
+    expect(twice({ variants: ["twice", "callers"] })).toBe(true);
   });
 });
 

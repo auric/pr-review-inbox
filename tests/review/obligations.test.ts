@@ -191,8 +191,8 @@ describe("no change without the mode (AC-R49)", () => {
       for (const q of [false, true])
         for (const r of [false, true])
           for (const split of [false, true]) {
-            prompts.push(withVerifyDelegation(verifyAgent(general, c, q, [], r), split, q, false, r).prompt);
-            prompts.push(verifierAgent(general, c, q, [], r).prompt);
+            prompts.push(withVerifyDelegation(verifyAgent(general, c, q, r), split, q, false, r).prompt);
+            prompts.push(verifierAgent(general, c, q, r).prompt);
           }
     const tasks: string[] = [];
     for (const [count, asked, risks] of [
@@ -226,10 +226,10 @@ describe("no change without the mode (AC-R49)", () => {
     expect(salvageAgent(bound).prompt).toBe(salvageAgent(general).prompt);
     for (const q of [false, true])
       for (const r of [false, true]) {
-        expect(verifyAgent(bound, GOAL, q, [], r, false).prompt).toBe(verifyAgent(general, GOAL, q, [], r).prompt);
-        expect(verifierAgent(bound, GOAL, q, [], r).prompt).toBe(verifierAgent(general, GOAL, q, [], r).prompt);
-        expect(withVerifyDelegation(verifyAgent(general, GOAL, q, [], r), true, q, false, r, false).prompt).toBe(
-          withVerifyDelegation(verifyAgent(general, GOAL, q, [], r), true, q, false, r).prompt,
+        expect(verifyAgent(bound, GOAL, q, r, false).prompt).toBe(verifyAgent(general, GOAL, q, r).prompt);
+        expect(verifierAgent(bound, GOAL, q, r).prompt).toBe(verifierAgent(general, GOAL, q, r).prompt);
+        expect(withVerifyDelegation(verifyAgent(general, GOAL, q, r), true, q, false, r, false).prompt).toBe(
+          withVerifyDelegation(verifyAgent(general, GOAL, q, r), true, q, false, r).prompt,
         );
       }
     expect(buildVerifyPrompt({ ...promptInput, count: 2, obligations: false, rereview: false })).toBe(
@@ -280,10 +280,10 @@ describe("rl-verify lines (AC-R50)", () => {
     const own = obligationRules(true, false);
     for (const q of [false, true])
       for (const r of [false, true]) {
-        const off = verifyAgent(general, HISTORY, q, [], r).prompt;
+        const off = verifyAgent(general, HISTORY, q, r).prompt;
         expect(off).not.toContain(FIRST);
         expect(off).not.toContain("obligation");
-        const on = lines(verifyAgent(general, HISTORY, q, [], r, true).prompt);
+        const on = lines(verifyAgent(general, HISTORY, q, r, true).prompt);
         for (const l of own) expect(on).toContain(l);
         expect(on.indexOf(FIRST)).toBeGreaterThan(on.lastIndexOf("Look for no new problems. A finder already ran."));
         expect(on[on.indexOf(own.at(-1) as string) + 1]).toBe(
@@ -294,8 +294,8 @@ describe("rl-verify lines (AC-R50)", () => {
         expect(obligationRules(false, !(q || r)).every((l) => on.includes(l))).toBe(true);
       }
     // Rule 16 only with history.md.
-    expect(lines(verifyAgent(general, HISTORY, false, [], false, true).prompt)).toContain(HISTORY_LINE);
-    expect(lines(verifyAgent(general, GOAL, false, [], false, true).prompt)).not.toContain(HISTORY_LINE);
+    expect(lines(verifyAgent(general, HISTORY, false, false, true).prompt)).toContain(HISTORY_LINE);
+    expect(lines(verifyAgent(general, GOAL, false, false, true).prompt)).not.toContain(HISTORY_LINE);
     // Rule 8a (the user's answer of 2026-11-18 to question 7) and its cite line.
     expect(own).toContain(
       "- The change brings an interface to a new platform, target, or variant. The repository guards that interface on another platform with a test, a link-time setting, or a symbol script. Then the new platform needs a matching guard.",
@@ -309,7 +309,7 @@ describe("rl-verify lines (AC-R50)", () => {
     for (const c of [GOAL, HISTORY])
       for (const q of [false, true])
         for (const r of [false, true]) {
-          const p = verifierAgent(bound, c, q, [], r).prompt;
+          const p = verifierAgent(bound, c, q, r).prompt;
           expect(p).not.toContain(FIRST);
           for (const l of obligationRules(c.history, false).filter((x) => !x.startsWith("Find the code")))
             expect(lines(p)).not.toContain(l);
@@ -317,19 +317,19 @@ describe("rl-verify lines (AC-R50)", () => {
   });
 
   test("above VERIFY_SPLIT, the delegation keeps the obligations in the main agent; ASD-STE100 holds for each new line", () => {
-    const split = withVerifyDelegation(verifyAgent(general, GOAL, true, [], true, true), true, true, false, true, true).prompt;
+    const split = withVerifyDelegation(verifyAgent(general, GOAL, true, true, true), true, true, false, true, true).prompt;
     expect(
       split.endsWith([...VERIFY_DELEGATE, VERIFY_DELEGATE_QUESTIONS, VERIFY_DELEGATE_RISKS, VERIFY_DELEGATE_OBLIGATIONS].join("\n")),
     ).toBe(true);
     expect(VERIFY_DELEGATE_OBLIGATIONS).toBe("Check the obligations yourself. Give none to the rl-verifier agent.");
-    const only = withVerifyDelegation(verifyAgent(general, GOAL, false, [], false, true), true, false, false, false, true).prompt;
+    const only = withVerifyDelegation(verifyAgent(general, GOAL, false, false, true), true, false, false, false, true).prompt;
     expect(only.endsWith([...VERIFY_DELEGATE, VERIFY_DELEGATE_OBLIGATIONS].join("\n"))).toBe(true);
     // No split: no delegation line.
-    expect(withVerifyDelegation(verifyAgent(general, GOAL, false, [], false, true), false, false, false, false, true).prompt).not.toContain(
+    expect(withVerifyDelegation(verifyAgent(general, GOAL, false, false, true), false, false, false, false, true).prompt).not.toContain(
       VERIFY_DELEGATE_OBLIGATIONS,
     );
     const added = lines(
-      withVerifyDelegation(verifyAgent(general, HISTORY, false, [], false, true), true, false, false, false, true).prompt,
+      withVerifyDelegation(verifyAgent(general, HISTORY, false, false, true), true, false, false, false, true).prompt,
     ).filter((l) => !lines(withVerifyDelegation(verifyAgent(general, HISTORY), true).prompt).includes(l));
     // Each obligation line, the place lines, and the delegation line are new to the prompt.
     expect(added).toEqual([...obligationRules(true, true), VERIFY_DELEGATE_OBLIGATIONS]);
@@ -457,14 +457,14 @@ describe("the cite check (AC-R53, section 4.4)", () => {
     for (const l of own) expect(obligationRules(false, false)).toContain(l);
     for (const q of [false, true])
       for (const r of [false, true]) {
-        const off = lines(verifyAgent(general, GOAL, q, [], r).prompt);
-        const on = lines(verifyAgent(general, GOAL, q, [], r, true).prompt);
+        const off = lines(verifyAgent(general, GOAL, q, r).prompt);
+        const on = lines(verifyAgent(general, GOAL, q, r, true).prompt);
         for (const l of own) {
           expect(off).not.toContain(l);
           expect(on).toContain(l);
         }
       }
-    expect(lines(verifierAgent(bound, GOAL, true, [], true).prompt).filter((l) => own.includes(l))).toEqual([]);
+    expect(lines(verifierAgent(bound, GOAL, true, true).prompt).filter((l) => own.includes(l))).toEqual([]);
   });
 });
 

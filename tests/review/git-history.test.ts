@@ -42,8 +42,8 @@ const finders = (p: Shipped, c: ReviewContext, lens: Lens | null = null) => [
 const others = (p: Shipped, c: ReviewContext) => [
   explainAgent(p),
   verifyAgent(p, c),
-  verifyAgent(p, c, true, [], true, true),
-  verifierAgent(p, c, true, [], true),
+  verifyAgent(p, c, true, true, true),
+  verifierAgent(p, c, true, true),
   salvageAgent(p),
 ];
 const reviewProfiles = SHIPPED_PROFILES.filter((x) => !x.explain);

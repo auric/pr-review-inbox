@@ -43,7 +43,7 @@ Sources: review-quality-2026.md (items 6, 7, 11, 12, section 2, section 4), arch
 - `judge()` validates one finder outcome. It then numbers the candidates and computes `overlapGroups` (judge.ts:295-365, :354).
 - Overlap groups join findings with the same path, the same side, and overlapping anchors (validate.ts:334-358).
 - A duplicate verdict counts only inside one overlap group. Outside a group it reads as unsure (judge.ts:437-454). A counted duplicate hides (judge.ts:472-476).
-- Above VERIFY_SPLIT (12) candidates, rl-verifier checks batches of 6 (catalog.ts:1426-1427). Only "verify2" keeps one group in one call (catalog.ts:1442, jobs.ts:1495).
+- Above VERIFY_SPLIT (12) candidates, rl-verifier checks batches of 6 (catalog.ts:1426-1427). Only "verify2" keeps one group in one call (catalog.ts:1442, jobs.ts:1495). verify2 was removed on 2026-11-27. The group line (VERIFY_GROUP) stays for the finder passes.
 - `verifyMaxTurns` grows with the candidate count, up to the profile turn cap (jobs.ts:265).
 - candidates.md holds at most 200 KB (context-files.ts:75-76) and MAX_FINDINGS blocks (review.ts:12). The rest stays unchecked.
 - A reply draft for an answered question carries no finding index. An "issue" becomes a normal finding (validate.ts:485-558).

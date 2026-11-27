@@ -165,7 +165,7 @@ beforeAll(async () => {
 const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
   candidateRepeat: null,
-  variants: ["broad", "verify2"],
+  variants: ["classes", "callers"],
   modules: ["failures"],
   baseEffort: null,
   effort: null,
@@ -278,7 +278,7 @@ describe("eval:ab --baseline checks", () => {
       if ("error" in o) throw new Error(o.error);
       return o;
     };
-    const cut = ["--clean", "8", "--repeat", "2", "--candidate-variants", "broad", "--candidate-effort", "low", "--review-only"];
+    const cut = ["--clean", "8", "--repeat", "2", "--candidate-variants", "classes", "--candidate-effort", "low", "--review-only"];
     const saved = runFlags(parsed(cut));
     expect(flagsRefusal(saved, parsed(cut))).toBeNull();
     // A flags file made before --candidate-verifier-model still resumes.
@@ -286,7 +286,7 @@ describe("eval:ab --baseline checks", () => {
     expect(flagsRefusal(older, parsed(cut))).toBeNull();
     // A changed or dropped flag of the cut run, and a flag that it did not have.
     const changes: [string[], string][] = [
-      [cut.map((x) => (x === "broad" ? "verify2" : x)), "--candidate-variants broad, but this run has --candidate-variants verify2."],
+      [cut.map((x) => (x === "classes" ? "callers" : x)), "--candidate-variants classes, but this run has --candidate-variants callers."],
       [cut.map((x) => (x === "low" ? "high" : x)), "--candidate-effort low, but this run has --candidate-effort high."],
       [
         [...cut, "--candidate-reviewer-effort", "high"],
@@ -528,12 +528,12 @@ describe("eval:ab arguments", () => {
       "fake",
     ]);
     expect(runArgs("review", "candidate", opts(), "o")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "broad,verify2", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "classes,callers", "--modules", `${shippedModules},failures`],
       ...["--ordinals", "--out", "o", "--runner", "fake"],
     ]);
     // --candidate-effort: only the candidate gets --effort.
     expect(runArgs("review", "candidate", opts({ effort: "xhigh" }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "broad,verify2", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "classes,callers", "--modules", `${shippedModules},failures`],
       ...["--effort", "xhigh", "--ordinals", "--runner", "fake"],
     ]);
     expect(runArgs("review", "baseline", opts({ effort: "xhigh" }), "")).not.toContain("--effort");
@@ -556,7 +556,7 @@ describe("eval:ab arguments", () => {
     ]);
     // A re-review candidate gets the same variants as a review candidate.
     expect(runArgs("rereview", "candidate", opts({ runner: null }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "broad,verify2"],
+      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "classes,callers"],
       ...["--modules", `${shippedModules},failures`, "--ordinals", "--real"],
     ]);
     // Bisect: no variants and no extra module.
@@ -569,22 +569,22 @@ describe("eval:ab arguments", () => {
   });
 
   // review-quality-2026.md WP-R1: the retired variants are refused before any build.
-  test("--candidate-variants takes broad and verify2 and refuses the retired variants", () => {
-    expect(parseAb(["--candidate-variants", "broad"])).toMatchObject({ variants: ["broad"] });
-    expect(parseAb(["--candidate-variants", "verify2,broad"])).toMatchObject({ variants: ["verify2", "broad"] });
+  test("--candidate-variants takes the opt-in variants and refuses the retired variants", () => {
+    expect(parseAb(["--candidate-variants", "callers,classes"])).toMatchObject({ variants: ["callers", "classes"] });
     // review-quality-2026.md item 7.
     expect(parseAb(["--candidate-variants", "classes"])).toMatchObject({ variants: ["classes"] });
-    // review-quality-2026.md item 10.
-    expect(parseAb(["--candidate-variants", "security2"])).toMatchObject({ variants: ["security2"] });
-    expect(parseAb(["--candidate-variants", "security2-verify"])).toMatchObject({ variants: ["security2-verify"] });
     // review-v3.md D2, the caller rule, with the flags of the Gate A command.
     const gate = ["--review-only", "--clean", "8", "--repeat", "2"];
     expect(parseAb([...gate, "--candidate-variants", "callers"])).toMatchObject({ variants: ["callers"], repeat: "2", reviewOnly: true });
-    // Prompt 2.9 ships "preexisting" and "risk-check" as defaults, so their names are retired.
-    for (const retired of ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"])
+    // Prompt 2.9 ships "preexisting" and "risk-check" as defaults, so their names are retired. The variants that failed their gates
+    // were removed on 2026-11-27.
+    for (const retired of [
+      ...["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"],
+      ...["broad", "verify2", "security2", "security2-verify", "refute-issue"],
+    ])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of architecture, broad, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, refute-issue, runs3, security2, security2-verify, stack, submodules, twice, verify2.",
+          "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, runs3, stack, submodules, twice.",
         ),
       });
   });
@@ -631,10 +631,7 @@ describe("eval:ab arguments", () => {
       ["--candidate-reviewer-effort", "low"],
       ["--candidate-reviewer-mode", "off"],
       ["--candidate-modules", "failures"],
-      ["--candidate-variants", "broad"],
-      ["--candidate-variants", "broad,verify2"],
       ["--candidate-variants", "classes"],
-      ["--candidate-variants", "security2"],
       // review-v3.md D2: the caller rule changes the finder prompt.
       ["--candidate-variants", "callers"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
@@ -646,22 +643,10 @@ describe("eval:ab arguments", () => {
     expect(parseAb(["--candidate-replay", "--candidate-verifier-effort", "high"])).toMatchObject({ replay: true, verifierEffort: "high" });
     // review-quality-2026.md item 6b: the verify model reaches only the verify call.
     expect(parseAb(["--candidate-replay", "--candidate-verifier-model", "haiku"])).toMatchObject({ replay: true, verifierModel: "haiku" });
-    // review-quality-2026.md item 4: verify2 changes only the verify prompts, so a replay can test it.
-    expect(parseAb(["--candidate-replay", "--candidate-variants", "verify2"])).toMatchObject({ replay: true, variants: ["verify2"] });
-    // review-quality-2026.md item 10: security2-verify is the verify half of security2.
-    expect(parseAb(["--candidate-replay", "--candidate-variants", "security2-verify"])).toMatchObject({
-      replay: true,
-      variants: ["security2-verify"],
-    });
     // obligations.md section 8: the obligation check changes only the verify prompts.
     expect(parseAb(["--candidate-replay", "--candidate-variants", "obligations"])).toMatchObject({
       replay: true,
       variants: ["obligations"],
-    });
-    // verifier-rule.md section 4.1: the rule changes only the verify prompts.
-    expect(parseAb(["--candidate-replay", "--candidate-variants", "refute-issue"])).toMatchObject({
-      replay: true,
-      variants: ["refute-issue"],
     });
     // --effort changes both sides, so the finder of the replay matches its baseline.
     expect(parseAb(["--candidate-replay", "--effort", "medium"])).toMatchObject({ replay: true });

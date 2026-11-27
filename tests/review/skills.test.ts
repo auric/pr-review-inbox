@@ -219,11 +219,24 @@ describe("skill prompts and profiles", () => {
     const dir = temp("cfg");
     const stored = {
       ...general,
-      variants: ["signal", "verify2", "order", "rules2", "rereview-strict", "preexisting", "risk-check", "broad"],
+      variants: [
+        "signal",
+        "verify2",
+        "order",
+        "callers",
+        "rules2",
+        "rereview-strict",
+        "preexisting",
+        "risk-check",
+        "broad",
+        "security2",
+        "security2-verify",
+        "refute-issue",
+      ],
     };
     json(join(dir, "config.json"), { baseUrl: "https://example.test", userSlug: "me", notifications: false, profiles: [stored] });
     const read = readConfig(dir)?.profiles?.find((p) => p.id === general.id);
-    expect(read).toEqual({ ...general, variants: ["broad", "verify2"] });
+    expect(read).toEqual({ ...general, variants: ["callers"] });
   });
 
   test("the profile schema dedupes skills and refuses bad IDs", () => {

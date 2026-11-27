@@ -27,7 +27,7 @@ import {
   reviewerAgent,
   SHIPPED_PROFILES,
   salvageAgent,
-  VERIFY2,
+  VERIFY_GROUP,
   verifierAgent,
   verifyAgent,
 } from "../../src/server/review/catalog";
@@ -129,8 +129,8 @@ function defaultBytes() {
         mainAgent(p, c).prompt,
         reviewerAgent(p, c).prompt,
         reviewerAgent(p, c, true).prompt,
-        verifyAgent(p, c, true, [], true, true).prompt,
-        verifierAgent(p, c, true, [], true).prompt,
+        verifyAgent(p, c, true, true, true).prompt,
+        verifierAgent(p, c, true, true).prompt,
         salvageAgent(p).prompt,
       );
   const stdin = [buildPrompt(input), buildPrompt({ ...input, questions: false })];
@@ -169,17 +169,17 @@ describe("variants lenses3 and runs3: prompts (focused-passes.md WP-L1)", () => 
         expect(passLenses(r)).toEqual([null, null, null]);
         expect(mainAgent(r, c)).toEqual(mainAgent(p, c));
         expect(reviewerAgent(r, c, true)).toEqual(reviewerAgent(p, c, true));
-        expect(verifyAgent(r, c, true, [], true, true)).toEqual(verifyAgent(p, c, true, [], true, true));
-        expect(verifierAgent(r, c, true, [], true)).toEqual(verifierAgent(p, c, true, [], true));
+        expect(verifyAgent(r, c, true, true, true)).toEqual(verifyAgent(p, c, true, true, true));
+        expect(verifierAgent(r, c, true, true)).toEqual(verifierAgent(p, c, true, true));
         expect(salvageAgent(r)).toEqual(salvageAgent(p));
         const l = withV(p, "lenses3");
         expect(passLenses(l)).toEqual(LENSES);
         expect(passLenses(withV(p, "runs3", "lenses3"))).toEqual(LENSES);
         expect(salvageAgent(l)).toEqual(salvageAgent(p));
         // focused-passes.md section 4.5: the L2 candidates need the verify lines of "architecture". runs3 gets none.
-        for (const a of [verifyAgent(l, c, true, [], true, true), verifierAgent(l, c, true, [], true)])
+        for (const a of [verifyAgent(l, c, true, true, true), verifierAgent(l, c, true, true)])
           expect(at(lines(a.prompt), ARCHITECTURE_VERIFY)).toBeGreaterThan(-1);
-        for (const a of [verifyAgent(r, c, true, [], true, true), verifierAgent(r, c, true, [], true)])
+        for (const a of [verifyAgent(r, c, true, true, true), verifierAgent(r, c, true, true)])
           for (const x of ARCHITECTURE_VERIFY) expect(lines(a.prompt)).not.toContain(x);
       }
     expect(promptVersion(withV(general, "lenses3"))).toBe(`${REVIEW_PROMPT_VERSION}+lenses3`);
@@ -537,7 +537,7 @@ describe("passes in a review run (focused-passes.md sections 4.2 to 4.9)", () =>
       const v = h.calls().find(h.isVerify) as Call;
       expect(v.context["candidates.md"]?.match(/^## Candidate \d+$/gm)).toHaveLength(18);
       const main = lines(v.agents["rl-main"]?.prompt ?? "");
-      expect(main).toContain(VERIFY2.group);
+      expect(main).toContain(VERIFY_GROUP);
       for (const x of ARCHITECTURE_VERIFY) expect(main).not.toContain(x);
       expect(d.events.filter((e) => e.tool === "Pass").map((e) => e.note)).toEqual([
         "Pass 1 of 3: repeat.",
