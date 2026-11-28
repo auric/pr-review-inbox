@@ -112,7 +112,15 @@ const PHASE_TABLE: Record<Phase, Partial<Record<PhaseEventType, Row[]>>> = {
   },
   setup: { CLEAN: [[null, "idle"]], ...ENDED },
   baseline: { CLEAN: [[null, "idle"]], ...ENDED },
-  building: { RUN_DONE: [[null, "checking"]], RUN_CUT: RUN_CUT("building"), ...ENDED },
+  building: {
+    RUN_DONE: [[null, "checking"]],
+    RUN_OPEN: [
+      ["continuesLeft", "idle"],
+      [null, "idle"],
+    ],
+    RUN_CUT: RUN_CUT("building"),
+    ...ENDED,
+  },
   checking: {
     CHECKS_GREEN: [[null, "idle"]],
     CHECKS_RED: [
@@ -587,6 +595,29 @@ describe("critic, judging, and push-back (ps4-plan.md WP-6)", () => {
     for (const type of ["WAIT", "STOPPED"] as const) expect(phaseStep("judging", type).to).toBe("idle");
   });
 
+  test("RUN_OPEN: a build run with open tasks goes back to idle, so GO builds again; only building takes it", () => {
+    expect(
+      walk([
+        ["GO", { run: true }],
+        ["RUN_OPEN", { continuesLeft: true }],
+        ["GO", { run: true }],
+        ["RUN_OPEN", { continuesLeft: true }],
+        ["GO", { run: true }],
+        ["RUN_OPEN"],
+      ]),
+    ).toEqual(["GO>building", "RUN_OPEN>idle", "GO>building", "RUN_OPEN>idle", "GO>building", "RUN_OPEN>idle"]);
+    // A queued follow-up comes first after an automatic continue, as after the user's Continue.
+    expect(
+      walk([
+        ["GO", { run: true }],
+        ["RUN_OPEN", { continuesLeft: true }],
+        ["GO", { follow: true, run: true }],
+      ]),
+    ).toEqual(["GO>building", "RUN_OPEN>idle", "GO>following"]);
+    for (const state of PHASES.filter((p) => p !== "building"))
+      expect(phaseStep(state, "RUN_OPEN", { ...NO_FACTS, continuesLeft: true }).can).toBe(false);
+  });
+
   test("Fix these too and Fix it anyway: following with a change goes to checking; with no change back to idle", () => {
     expect(walk([["GO", { follow: true }], ["RUN_DONE"], ["CHECKS_GREEN"], ["GO", { review: true }], ["CLEAN"]])).toEqual([
       "GO>following",
@@ -749,6 +780,8 @@ describe("machineMermaid", () => {
   baseline --> idle: WAIT
   baseline --> idle: STOPPED
   building --> checking: RUN_DONE
+  building --> idle: RUN_OPEN if continuesLeft
+  building --> idle: RUN_OPEN
   building --> building: RUN_CUT if firstCut
   building --> idle: RUN_CUT
   building --> idle: WAIT

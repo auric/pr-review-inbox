@@ -1067,7 +1067,8 @@ describe("the prompt lines of the shell state", () => {
     expect(l).toContain(
       "You can run only these commands: `echo *`, `bun test *`, `bun run lint *`. Read-only commands, such as ls, cat, grep, and rg, also run. Claude Code refuses every other command.",
     );
-    expect(l).toContain("Run the failing check first to see the failure. Run it again after your change.");
+    expect(l).toContain("Run the failing check first to see the failure.");
+    expect(l.join("\n")).not.toContain("Run it again after your change.");
   });
 
   test("Gate B31: allowlist never runs cd; Most commands and Unrestricted may run cd repo; every shell step edits with the file tools", () => {
@@ -1151,8 +1152,24 @@ describe("the prompt lines of the shell state", () => {
     expect(l).toContain(
       'failure.md marks a command that also failed on the part base with "Also red on the part base". Do not try to fix that command. Fix only the new failures.',
     );
-    expect(l).not.toContain("Run the failing check first to see the failure. Run it again after your change.");
+    expect(l).not.toContain("Run the failing check first to see the failure.");
     expect(lines("implement", null).join("\n")).not.toContain("Set checkCause to env");
+  });
+
+  test("opus55-prompting.md section 9: the first build request names the unwanted stops; a resumed run and a fix run do not", () => {
+    const STOPS =
+      "Do not stop to report progress or to ask for confirmation while open tasks remain. Continue until you tick every open task, or until a real blocker stops you. Name the blocker: set question or outside.";
+    const of = (mode: "implement" | "fix", resume: number | null) =>
+      implementPrompt(mode, "specs/K-1/", false, false, "", "", { skills: [], mcp: [] }, null, {
+        ord: 1,
+        tasksFile: "./repo/specs/K-1/plan.md",
+        resume,
+        purpose: "build",
+      }).split("\n");
+    const first = of("implement", null);
+    expect(first.indexOf(STOPS) - first.findIndex((x) => x.startsWith("End the run when every open task"))).toBe(1);
+    expect(of("implement", 2)).not.toContain(STOPS);
+    expect(of("fix", null)).not.toContain(STOPS);
   });
 
   test("AC-B335: a fix run with points gets the 6.23.8 lines in a new and a resumed session; other runs do not", () => {

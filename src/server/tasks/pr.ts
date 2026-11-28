@@ -29,7 +29,7 @@ import { endStep, insertStep } from "./implement";
 import type { Plan } from "./plan";
 import { commitGitlink, noMergeText, pointerTarget } from "./pointer";
 import { type PreflightDeps, preflight } from "./preflight";
-import { type PushResult, pushTaskBranch } from "./push";
+import { failedText, type PushResult, pushTaskBranch } from "./push";
 import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
 import {
   ADOPTED,
@@ -220,11 +220,18 @@ export function withRelated(description: string, others: { name: string; id: num
 // The sentence of a push that did not happen, or null after the push.
 function pushSentence(r: PushResult, branch: string): string | null {
   if (r.status === "refused") return r.reason;
-  if (r.status === "stale") return r.sentence;
+  if (r.status === "stale" || r.status === "failed") return r.sentence;
   if (r.status === "needs_force") return `${branch} on the server has commits that this part does not have. Get them first.`;
-  if (r.status === "failed") return `The push of ${branch} failed: ${noUrl(r.message)}`;
   return null;
 }
+// The Log notes of a push: the sentence, then the git output of a failed push.
+const pushNotes = (r: PushResult, sentence: string) => (r.status === "failed" ? [sentence, `git: ${noUrl(r.message)}`] : [sentence]);
+// A push that threw: the plain line for the user, and the error in the Log.
+const thrown = (branch: string, e: unknown) => {
+  const message = (e as Error).message;
+  const error = failedText(branch, message);
+  return { error, notes: [error, `git: ${noUrl(message)}`] };
+};
 
 const createSentence = (e: unknown, at: { project: string; repo: string }) =>
   e instanceof ForgeError ? writeProblem(e, "create", at).sentence : `The PR create failed: ${noUrl((e as Error).message)}`;
@@ -325,8 +332,8 @@ export function createPrOpener(deps: OpenPrDeps) {
     const prefix = taskSettingsOf(t).branchPrefix ?? part.branch.slice(0, Math.max(0, part.branch.indexOf(`${key}-`)));
     const step = insertStep(db, { task: id, part: part.id, kind: "push", item: part.branch }, now());
     changed(id);
-    const fail = (status: 409 | 502, error: string, at = step): TaskResult => {
-      endStep(db, at, "failed", { notes: [error] }, now());
+    const fail = (status: 409 | 502, error: string, at = step, notes = [error]): TaskResult => {
+      endStep(db, at, "failed", { notes }, now());
       return status === 409 ? conflict(db, id, error) : { status, error };
     };
     let remote: BranchRemote;
@@ -354,10 +361,11 @@ export function createPrOpener(deps: OpenPrDeps) {
         task: { key, prefix, branches, target: t.target_branch, found: continued(db, t, part) },
       });
     } catch (e) {
-      return fail(502, `The push of ${part.branch} failed: ${noUrl((e as Error).message)}`);
+      const x = thrown(part.branch, e);
+      return fail(502, x.error, step, x.notes);
     }
     const refused = pushSentence(r, part.branch);
-    if (refused) return fail(r.status === "failed" ? 502 : 409, refused);
+    if (refused) return fail(r.status === "failed" ? 502 : 409, refused, step, pushNotes(r, refused));
     db.transaction(() => {
       db.query(Q.pushed).run({ id: part.id, commit: head, now: now() });
       endStep(db, step, "ok", { notes: [`Pushed ${head} to ${part.branch}.`] }, now());
@@ -482,18 +490,18 @@ export function createPrOpener(deps: OpenPrDeps) {
       // A parent commit points at the commit of each changed child, so a child that is not on the server stops the parent push. A merged
       // child is on its base branch.
       const child = rows.find((c) => c.parent === r.taskRepo && c.state !== "merged" && (c.head === null || c.pushed !== c.head));
-      let out: { error: string | null; failed: boolean };
+      let out: { error: string | null; failed: boolean; notes?: string[] };
       try {
         out = child
           ? { error: `${nameOf(r)} waits, because ${nameOf(child)} is not on the server yet.`, failed: false }
           : await pushOne(db, t, part, r);
       } catch (e) {
-        out = { error: `The push of ${r.branch} failed: ${noUrl((e as Error).message)}`, failed: true };
+        out = { ...thrown(r.branch, e), failed: true };
       }
       const error = out.error;
       db.transaction(() => {
         if (error) {
-          endStep(db, step, "failed", { notes: [error] }, now());
+          endStep(db, step, "failed", { notes: out.notes ?? [error] }, now());
           if (r.role !== "main") db.query(Q.subFailed).run({ part: partId, repo: r.taskRepo, error });
           return;
         }
@@ -567,7 +575,12 @@ export function createPrOpener(deps: OpenPrDeps) {
   }
 
   // One push of a row from the cache of its repository, with the lease of its last push. failed: the push itself failed, not a refusal.
-  async function pushOne(db: Database, t: TaskRow, part: PartRow, r: PrRow): Promise<{ error: string | null; failed: boolean }> {
+  async function pushOne(
+    db: Database,
+    t: TaskRow,
+    part: PartRow,
+    r: PrRow,
+  ): Promise<{ error: string | null; failed: boolean; notes?: string[] }> {
     if (r.access !== "edit") return { error: `The token cannot push to ${nameOf(r)}.`, failed: false };
     if (!r.head) return { error: `${nameOf(r)} has no commit to push.`, failed: false };
     const key = keyOf(t, part);
@@ -596,7 +609,8 @@ export function createPrOpener(deps: OpenPrDeps) {
         found: continued(db, t, part),
       },
     });
-    return { error: pushSentence(res, r.branch), failed: res.status === "failed" };
+    const error = pushSentence(res, r.branch);
+    return { error, failed: res.status === "failed", ...(error && { notes: pushNotes(res, error) }) };
   }
 
   // spec.md section 6.16.8, Links: after the last create, each open PR of the part lists the other PRs. A fresh read gives the version
@@ -701,9 +715,9 @@ export function createPrOpener(deps: OpenPrDeps) {
     const path = fullPath(taskRepos(db, t), sub);
     const step = insertStep(db, { task: id, part: partId, kind: "commit", item: "pointer" }, now());
     changed(id);
-    const fail = (at: number, error: string) =>
+    const fail = (at: number, error: string, notes = [error]) =>
       db.transaction(() => {
-        endStep(db, at, "failed", { notes: [error] }, now());
+        endStep(db, at, "failed", { notes }, now());
         db.query(Q.pointerError).run({ id: taskPr, error });
       })();
     try {
@@ -736,12 +750,15 @@ export function createPrOpener(deps: OpenPrDeps) {
     const push = insertStep(db, { task: id, part: partId, kind: "push", item: nameOf(main) }, now());
     changed(id);
     let error: string | null;
+    let notes: string[] | undefined;
     try {
-      error = main.pushed === main.head ? null : (await pushOne(db, f.t, f.part, main)).error;
+      const out = main.pushed === main.head ? null : await pushOne(db, f.t, f.part, main);
+      error = out?.error ?? null;
+      notes = out?.notes;
     } catch (e) {
-      error = `The push of ${main.branch} failed: ${noUrl((e as Error).message)}`;
+      ({ error, notes } = thrown(main.branch, e));
     }
-    if (error) return fail(push, error);
+    if (error) return fail(push, error, notes);
     db.transaction(() => {
       db.query(Q.pushed).run({ id: partId, commit: main.head, now: now() });
       db.query(Q.pointed).run({ id: taskPr });

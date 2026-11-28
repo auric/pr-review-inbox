@@ -338,10 +338,48 @@ describe("the build run (part-session.md sections 2.3, 2.4, and 2.6)", () => {
   );
 
   test(
-    "AC-B293: done true with an open task left gives the reason unfinished; Continue builds the open task, and result.ticked feeds a Log note",
+    "AC-B293: a run that leaves an open task twice gets two automatic continues, and the third run finishes the part with no reason",
     async () => {
       const s = await setup({
-        seq: { "implement:build": [{ writes: [TEST_FILE, TODO] }, { writes: [WORKS], ticks: TICK }] },
+        seq: { "implement:build": [{ writes: [TEST_FILE, TODO] }, { writes: [TODO] }, { writes: [WORKS], ticks: TICK }] },
+      });
+      await s.build();
+      expect([s.blocked(), s.part().state]).toEqual([null, "self_reviewed"]);
+      const builds = s.steps().filter((x) => x.kind === "implement");
+      expect(builds.map((x) => detailOf(s, x.id).notes.filter((n: string) => n.startsWith("Continued by the app")))).toEqual([
+        ["Continued by the app (1 of 2)."],
+        ["Continued by the app (2 of 2)."],
+        [],
+      ]);
+      expect(s.phases.filter((p) => p.event === "RUN_OPEN").map((p) => `${p.from}>${p.to}`)).toEqual(["building>idle", "building>idle"]);
+      // An automatic continue is the run of the user's Continue: a resumed build run with the open tasks.
+      const calls = s.runCalls().filter((c) => callKey(c.argv, c.stdin) === "implement:build");
+      expect(calls).toHaveLength(3);
+      for (const call of calls.slice(1)) {
+        expect(call.argv).toContain("--resume");
+        expect(call.stdin).toContain("Go on with the open tasks of ./context/step.md.");
+      }
+      // The echo result lists no tick, so the last run gets the note.
+      expect(detailOf(s, (builds[2] as Step).id).notes).toContain(
+        "Claude listed the ticks none, and the plan file holds the new ticks T1.1.",
+      );
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B293: the third run that leaves an open task gives the reason unfinished; Continue builds the open task, and a new driver counts again",
+    async () => {
+      const s = await setup({
+        seq: {
+          "implement:build": [
+            { writes: [TEST_FILE, TODO] },
+            { writes: [TODO] },
+            { writes: [TODO] },
+            { writes: [TODO] },
+            { writes: [WORKS], ticks: TICK },
+          ],
+        },
       });
       await s.build();
       const b = s.blocked();
@@ -350,15 +388,55 @@ describe("the build run (part-session.md sections 2.3, 2.4, and 2.6)", () => {
         "Needs you: Claude ended the run before part 1 was done: Echo: the step is done. Continue goes on with the open tasks.",
       );
       expect(s.t().state).toBe("implementing");
+      const builds = s.steps().filter((x) => x.kind === "implement");
+      expect(builds).toHaveLength(3);
+      expect(b?.step).toBe((builds[2] as Step).id);
+      expect(detailOf(s, (builds[2] as Step).id).notes.filter((n: string) => n.startsWith("Continued by the app"))).toEqual([]);
+      // The third RUN_OPEN has continuesLeft false. Its reason comes at idle, so no WAIT follows.
+      expect(s.phases.filter((p) => p.from === "building").map((p) => p.event)).toEqual(["RUN_OPEN", "RUN_OPEN", "RUN_OPEN"]);
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
-      expect(s.part().state).toBe("self_reviewed");
-      const builds = s.steps().filter((x) => x.kind === "implement");
-      expect(builds).toHaveLength(2);
-      // The echo result lists no tick, so the second run gets the note.
-      expect(detailOf(s, (builds[1] as Step).id).notes).toContain(
-        "Claude listed the ticks none, and the plan file holds the new ticks T1.1.",
-      );
+      // The Continue driver gets its own two continues: run 4 leaves the task open, and run 5 finishes it.
+      expect([s.blocked(), s.part().state]).toEqual([null, "self_reviewed"]);
+      const after = s.steps().filter((x) => x.kind === "implement");
+      expect(after).toHaveLength(5);
+      expect(detailOf(s, (after[3] as Step).id).notes).toContain("Continued by the app (1 of 2).");
+    },
+    SLOW * 2,
+  );
+
+  test(
+    "AC-B293: a failed build run gets no automatic continue",
+    async () => {
+      const s = await setup();
+      s.scenario({
+        seq: {
+          "implement:build": [
+            { fixture: emptyFixture(s.root), exitCode: 1 },
+            { writes: [TEST_FILE, WORKS], ticks: TICK },
+          ],
+        },
+      });
+      await s.build();
+      expect(s.blocked()).toMatchObject({ kind: "error", cause: "run" });
+      expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(1);
+      expect(s.phases.some((p) => p.event === "RUN_OPEN")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "AC-B293: a part over its cost limit gets no automatic continue",
+    async () => {
+      const s = await setup({ seq: { "implement:build": [{ writes: [TEST_FILE, TODO] }, { writes: [WORKS], ticks: TICK }] } });
+      const settings = JSON.parse(s.t().settings_json);
+      s.db
+        .query("UPDATE task SET settings_json = $s WHERE id = $id")
+        .run({ id: s.task, s: JSON.stringify({ ...settings, partCost: 0.0001 }) });
+      await s.build();
+      expect(s.blocked()).toMatchObject({ kind: "unfinished" });
+      expect(s.steps().filter((x) => x.kind === "implement")).toHaveLength(1);
+      expect(s.phases.filter((p) => p.event === "RUN_OPEN").map((p) => p.to)).toEqual(["idle"]);
     },
     SLOW,
   );
@@ -1075,7 +1153,8 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
   test(
     "AC-B364: a restart while the part waits with its own reason: the message stays waiting, and Continue on that reason runs it",
     async () => {
-      // The first build run ticks nothing, so the part waits with unfinished. The second one finishes the part.
+      // The first build run ticks nothing and uses up the cost limit, so the part waits with unfinished and no automatic continue. The
+      // second one finishes the part.
       const s = await setup({
         sessionGates: OFF,
         seq: {
@@ -1086,6 +1165,10 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
           "implement:instruct": [{ writes: [FIXED] }],
         },
       });
+      const settings = JSON.parse(s.t().settings_json);
+      const limit = (partCost?: number) =>
+        s.db.query("UPDATE task SET settings_json = $s WHERE id = $id").run({ id: s.task, s: JSON.stringify({ ...settings, partCost }) });
+      limit(0.0001);
       s.loop.build(s.db, s.task);
       await until(() => building(s));
       expect(s.loop.instruct(s.db, s.task, { version: s.t().version, text: SEND }).status).toBe(202);
@@ -1095,6 +1178,7 @@ describe("live messages (ps4-plan.md WP-7, part-session.md section 2.9)", () => 
       expect([unfinished?.kind, s.steps().find((x) => x.id === queued)?.state]).toEqual(["unfinished", "waiting"]);
       recoverTasks(s.db, Date.now(), s.dataDir);
       expect([s.blocked(), s.steps().find((x) => x.id === queued)?.state]).toEqual([unfinished, "waiting"]);
+      limit();
       expect(s.loop.resume(s.db, s.task, { version: s.t().version }).status).toBe(200);
       await s.loop.idle(s.task);
       ranOnce(s, ["instruct:I1:ok"]);

@@ -129,7 +129,7 @@ A colleague's app gives unrestricted Bash, local git with push denied, a push an
 
 - openTasks counts only part tasks (loop.ts:1078). External rows are outside the plan file, so the gate never waits for them.
 - A Claude result with `outside` entries: the app changes `### [ ] <id>` to `### [-] <id>` in the plan file, in the next app commit. It adds a task_external row per entry and goes on to the gate. tickTask and the plan parser treat `[-]` as closed. No ask comes unless an entry has `blocking: true` (cause `outside`, section 7). This is D10.
-- An unfinished run with no ask and no outside entry continues once by itself, as build-redesign.md does for a cut run. Then cause `cut`.
+- A build run that ends normally with open tasks and no ask continues by itself up to two times per driver while the part is under its cost limit (part-session.md section 9.3.3, RUN_OPEN). The Log notes "Continued by the app (n of 2)." The third stop gives the reason unfinished.
 - The FINISHED guard of the task reads the external rows (section 11.1).
 
 ## 6. Checks

@@ -78,6 +78,7 @@ import {
   insertStep,
   PATCH_LOST,
   type PathProblem,
+  partBudget,
   patchStep,
   runningStep,
   type StepInput,
@@ -205,6 +206,8 @@ import {
 // spec.md section 0. The default of Settings > Tasks "Test-fix tries".
 export const TEST_FIX_TRIES = RUN_LIMITS.testFixTries.def;
 export const REVIEW_FIX_TRIES = 2;
+// part-session.md section 9.3.3, guard continuesLeft: the automatic continues of one driver of a part (opus55-prompting.md U1).
+export const AUTO_CONTINUES = 2;
 // spec.md section 6.1, Counting: the excluded globs when the repository sets none.
 export const LOCK_GLOBS = ["bun.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock", "*.lock"];
 
@@ -546,9 +549,11 @@ type Ctx = {
   // state ready.
   mode: DriverMode;
   // part-session.md section 9.3.3: the phase of the part. The build, follow-up, and update drivers track it.
-  // rounds: the review rounds of this driver. waited: a run or a step of this part set its own reason.
+  // rounds: the review rounds of this driver. continues: the automatic continues of this driver. waited: a run or a step of this part
+  // set its own reason.
   phase: Phase | null;
   rounds: number;
+  continues: number;
   waited: boolean;
   // The first follow-up row that this driver ran, or null. Each later run of that follow-up has a higher row ID.
   follow: number | null;
@@ -2485,6 +2490,7 @@ export function createLoop(opts: LoopOptions) {
       mode,
       phase: null,
       rounds: 0,
+      continues: 0,
       waited: false,
       follow: null,
     };
@@ -2523,18 +2529,30 @@ export function createLoop(opts: LoopOptions) {
   }
 
   // part-session.md sections 2.3 and 2.6: the build run of the open tasks. Done true with every open task ticked goes to the gate. Else
-  // the part waits with the reason unfinished. The phase is building at the start and idle at the end.
+  // the part waits with the reason unfinished. Section 9.3.3, RUN_OPEN: a run that left open tasks goes back to GO up to AUTO_CONTINUES
+  // times while the part is under its cost limit. claude() returns only for a run that ended normally. The phase is building at the start
+  // and idle at the end.
   async function buildRun(c: Ctx) {
     const step = (a: number) => partStepFile(c.plan, c.plan.parts, "build", a);
     const r = await claude(c, "implement", "build", { allow: allFiles(c), step, purpose: "build" });
     refreshPlan(c);
+    const open = openTasks(c).length;
     // task-builder-v2.md section 5.4: a run that moved tasks to the checklist and left no open task goes to the gate.
-    if (openTasks(c).length || (!r.result.done && !r.checklist.length))
-      block(c, {
-        kind: "unfinished",
-        step: r.step,
-        text: `Needs you: Claude ended the run before part ${c.part.ord} was done: ${oneLine(r.result.summary)} Continue goes on with the open tasks.`,
+    if (open || (!r.result.done && !r.checklist.length)) {
+      const left = open > 0 && c.continues < AUTO_CONTINUES && partBudget(c.db, c.id, c.part).over === null;
+      if (open) send(c, { type: "RUN_OPEN" }, { continuesLeft: left });
+      if (!left)
+        block(c, {
+          kind: "unfinished",
+          step: r.step,
+          text: `Needs you: Claude ended the run before part ${c.part.ord} was done: ${oneLine(r.result.summary)} Continue goes on with the open tasks.`,
+        });
+      c.continues++;
+      patchStep(c.db, r.step, {
+        notes: [...stepDetailOf(c.db, r.step).notes, `Continued by the app (${c.continues} of ${AUTO_CONTINUES}).`],
       });
+      return;
+    }
     send(c, { type: "RUN_DONE" });
     await checkGate(c, roundGate(c, "build"));
   }

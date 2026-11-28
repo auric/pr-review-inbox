@@ -216,6 +216,19 @@ describe("the token (AC-B22)", () => {
     expect(r.status).toBe("failed");
     expect(JSON.stringify(r)).not.toContain(TOKEN);
     expect(r.status === "failed" && r.message).toContain("[redacted]");
+    expect(r.status === "failed" && r.sentence).toBe(
+      `The push of ${B("token")} failed. Read the git output in the Log, fix the cause, then try again.`,
+    );
     expect(logText()).not.toContain(TOKEN);
+  });
+
+  test("a server branch that is a folder of the new name gives one plain line with no local path", async () => {
+    const branch = "feature/ABC-1-folder";
+    const r = await pushTaskBranch(input({ branch, task: { ...TASK, prefix: "feature/", branches: [branch] } }));
+    expect(r.status).toBe("failed");
+    expect(r.status === "failed" && r.sentence).toBe(
+      `The server has the branch feature, so git cannot create ${branch}. Rename or delete feature on the server, then try again.`,
+    );
+    expect(await at(branch)).toBeNull();
   });
 });

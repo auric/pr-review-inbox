@@ -753,7 +753,7 @@ export function implementPrompt(
       "./context/failure.md holds the failing output or the review findings. Fix the cause. Change a test only when the test is wrong, and say so in notes.",
       "When the output shows a broken command, a missing tool, or a network or environment fault, change no file. Set checkCause to env, copy the line of the output that shows the fault into quote, and stop.",
       'failure.md marks a command that also failed on the part base with "Also red on the part base". Do not try to fix that command. Fix only the new failures.',
-      ...(checks.length ? ["Run the failing check first to see the failure. Run it again after your change."] : []),
+      ...(checks.length ? ["Run the failing check first to see the failure."] : []),
       ...(points ? POINTS_LINES : []),
     ],
     // spec.md section 6.18.2, prompt lines of mode instruct.
@@ -797,6 +797,13 @@ export function implementPrompt(
     mode === "implement"
       ? "End the run when every open task is ticked and its tests pass, or when you need the user. Set done to true only then. List the IDs that you ticked in ticked. When an open task needs the app or the user, list it in outside with its kind and why. Do not tick it."
       : "Set done to true only when the step is complete.";
+  // opus55-prompting.md section 9: the unwanted stops of a build run. Only the first request of a session holds it.
+  const stops =
+    mode === "implement"
+      ? [
+          "Do not stop to report progress or to ask for confirmation while open tasks remain. Continue until you tick every open task, or until a real blocker stops you. Name the blocker: set question or outside.",
+        ]
+      : [];
   // spec.md section 6.21, D3, D6, and D7.
   const ask =
     "When Claude Code refuses a command that the step needs, do not try another form of it. End the step: set allowRequest with the narrowest pattern, the refused command, and a reason. Set done to false.";
@@ -894,6 +901,7 @@ export function implementPrompt(
     "Never edit .claude folders, .mcp.json, CLAUDE.md, CLAUDE.local.md, AGENTS.md, .gitmodules, or git hook sources.",
     "Never write secrets, tokens, or passwords into a file.",
     result,
+    ...stops,
     untrusted,
     ...userLines,
     ...lines.mcp,

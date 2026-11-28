@@ -145,7 +145,17 @@ describe("Push and open the PRs of several repositories (spec.md section 6.16.8)
       expect(s.flow().slice(-2)).toEqual(["push:PROJ/lib:failed", "push:PROJ/app:failed"]);
       const failed = dto(s);
       expect(rowOf(failed, "lib")).toMatchObject({ state: "failed", pushed: null });
-      expect(rowOf(failed, "lib").error).toStartWith(`The push of ${BRANCH} failed:`);
+      // The row shows one plain line. The Log keeps the git output with the hook message.
+      expect(rowOf(failed, "lib").error).toBe(
+        `The push of ${BRANCH} failed. Read the git output in the Log, fix the cause, then try again.`,
+      );
+      const push = s.db
+        .query("SELECT detail_json FROM task_step WHERE task = $t AND kind = 'push' AND item = 'PROJ/lib' ORDER BY id DESC LIMIT 1")
+        .get({ t: s.task }) as { detail_json: string };
+      const notes = JSON.parse(push.detail_json).notes as string[];
+      expect(notes[0]).toBe(rowOf(failed, "lib").error as string);
+      expect(notes[1]).toStartWith("git: ");
+      expect(notes[1]).toContain("refused on purpose");
       expect(rowOf(failed, "app")).toMatchObject({
         state: "failed",
         pushed: null,

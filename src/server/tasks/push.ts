@@ -15,6 +15,15 @@ const SAFE = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/;
 const PUSH_MS = 120_000;
 
 export const staleText = (branch: string) => `Someone else pushed to ${branch}. Get their commits first.`;
+// git refs.c refs_verify_refname_available: "'%s' exists; cannot create '%s'". git refs are paths, so "a" and "a/b" cannot both exist.
+const TAKEN = /'refs\/heads\/([^'\s]+)' exists; cannot create 'refs\/heads\//;
+// The one line of a failed push. The raw git output can hold local paths, so it goes only to the Log.
+export function failedText(branch: string, message: string): string {
+  const taken = TAKEN.exec(message)?.[1];
+  return taken
+    ? `The server has the branch ${taken}, so git cannot create ${branch}. Rename or delete ${taken} on the server, then try again.`
+    : `The push of ${branch} failed. Read the git output in the Log, fix the cause, then try again.`;
+}
 
 export type PushInput = {
   // The bare cache. It holds commit and lease.
@@ -45,7 +54,7 @@ export type PushResult =
   | { status: "refused"; reason: string }
   | { status: "needs_force" }
   | { status: "stale"; sentence: string }
-  | { status: "failed"; message: string };
+  | { status: "failed"; message: string; sentence: string };
 
 // The reason to refuse a push before git runs, or null.
 export function pushRefusal(input: Pick<PushInput, "branch" | "commit" | "lease" | "task">): string | null {
@@ -111,6 +120,6 @@ export async function pushTaskBranch(input: PushInput): Promise<PushResult> {
       return { status: "stale", sentence: staleText(branch) };
     }
     log(`The push of ${branch} failed: ${message}`);
-    return { status: "failed", message };
+    return { status: "failed", message, sentence: failedText(branch, message) };
   }
 }

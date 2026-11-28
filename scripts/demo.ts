@@ -1129,6 +1129,8 @@ writeConfig(dataDir, {
   taskRules: (["branch", "title", "description"] as const).map((source) => ({ source, pattern, keys: ["ABC"] })),
   taskLink: "https://tracker.example.test/browse/{key}",
   jira: { baseUrl: jira.url },
+  // The demo remote has a branch "feature", so a "feature/" task branch cannot exist there (git refs are paths).
+  taskBranchPrefixes: ["task/", "bugfix/", "hotfix/"],
   // General gets skills and an MCP server of the synthetic config, so the brief, the run setup, and Settings show them.
   // Its edited turn cap shows the field reset in the Settings screenshot.
   profiles: SHIPPED_PROFILES.map((p) =>
@@ -1169,12 +1171,6 @@ db?.query("INSERT INTO repo_clone (project, repo, path, updated_at) VALUES ('PRO
   path: cloneDir,
   now: Date.now(),
 });
-// The demo remote has a branch "feature", so a "feature/" task branch cannot exist there (git refs are paths). Tasks use "task/".
-db?.query("INSERT INTO repo_task_settings (project, repo, branch_prefix, updated_at) VALUES ('PROJ1', 'sample-repo-4', 'task/', $now)").run(
-  {
-    now: Date.now(),
-  },
-);
 // The clone of PROJ1/app gives the commits of ABC-10720 their identity. It sits in the folder of the fake CLI, which the stop removes.
 const appClone = join(claudeDir, "app-clone");
 await git(["clone", "-q", "--no-checkout", multi.app.remote, appClone], { env: cloneEnv });

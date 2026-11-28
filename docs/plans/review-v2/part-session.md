@@ -1033,6 +1033,7 @@ purpose is a new field of StepDetail.session, which section 5.3 already adds. Th
 | critic | the part is implementing, an ok build commit exists after the restart mark, and no critic row (ok or failed) exists after the mark. A cancelled critic runs again. A critic that an app restart cut ends cancelled, so it runs again. | new (2.7) |
 | review | a commit after the last ok own review holds work of a Claude run. Only rows after the restart mark count, the own review rows are those with item review, and a green update row with a resolve run counts as such a commit. | loop.ts:2297-2298 (Q57); spec.md 6.7, Own review |
 | firstCut | the run reached its turn cap or process cap, and no earlier cut of this purpose follows the last commit | new (2.2, Cut runs) |
+| continuesLeft | the build run left open tasks, this driver made fewer than AUTO_CONTINUES (2) automatic continues, and the part is under its cost limit | buildRun c.continues, partBudget (opus55-prompting.md section 9) |
 | afterUpdate | the gate runs after an update | loop.ts:2289-2294 |
 | redBefore | each failing command failed on the base with the same argv, and this item has no red-before row | loop.ts:1276-1280 |
 | triesLeft | the fix runs of this gate are fewer than "Test-fix tries" | loop.ts:1273-1274, :1290 |
@@ -1061,6 +1062,8 @@ App-only commits need no review: the plan commit, the line-end repair, a clean m
 | setup, baseline | STOPPED | none | idle | none |
 | baseline | CLEAN | none | idle | store the baseline; red is no reason (loop) |
 | building, judging | RUN_DONE | none | checking | tick check; the path check already ran (loop) |
+| building | RUN_OPEN | continuesLeft | idle | the run ended normally with open tasks. Log note "Continued by the app (n of 2)." on the run row; the next GO picks the phase, as after Continue (loop) |
+| building | RUN_OPEN | none | idle | reason unfinished, set at idle, so no WAIT follows (loop) |
 | fixing, following | RUN_DONE | unchanged | idle | fixing: reason question/no_change. following: result no_change, and the earlier reason comes back (loop) |
 | fixing, following | RUN_DONE | none | checking | as building |
 | building, fixing, judging, following | RUN_CUT | firstCut | the same state | one run with "Continue where you stopped." (loop) |
@@ -1268,6 +1271,8 @@ stateDiagram-v2
   baseline --> idle: CLEAN
   baseline --> idle: STOPPED
   building --> checking: RUN_DONE
+  building --> idle: RUN_OPEN if continuesLeft
+  building --> idle: RUN_OPEN
   building --> building: RUN_CUT if firstCut
   building --> idle: RUN_CUT
   building --> idle: WAIT
@@ -1365,7 +1370,7 @@ stateDiagram-v2
 | stuck/stall (new) | PS2 detects, PS3 writes | I, R | yes | CONTINUE | Start this part again; Stop; R: leave | resumes the session; the work stays |
 | stuck/loop (new) | same | I, R | yes | CONTINUE | same | same |
 | stuck/turns, stuck/time (new) | PS3, second cut | I, R | yes | CONTINUE | same | one more continuation run |
-| unfinished (new) | PS3, done false | I, R | yes | CONTINUE | same | resumes the session with "Go on with the open tasks." |
+| unfinished (new) | PS3, done false; with open tasks only after the automatic continues (RUN_OPEN) | I, R | yes | CONTINUE | same | resumes the session with "Go on with the open tasks." The new driver counts its automatic continues from 0. |
 
 Every reason has a primary exit. Stop is also an exit for every reason except update, which has leave in ready.
 

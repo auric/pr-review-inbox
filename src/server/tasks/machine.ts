@@ -203,6 +203,8 @@ export const PHASE_EVENTS = [
   "STOPPED",
   "RUN_DONE",
   "RUN_CUT",
+  // part-session.md section 9.3.3: a build run ended normally with open tasks left.
+  "RUN_OPEN",
   "CHECKS_GREEN",
   "CHECKS_RED",
   "POINTS",
@@ -220,6 +222,7 @@ export const PHASE_GUARDS = [
   "critic",
   "review",
   "firstCut",
+  "continuesLeft",
   "afterUpdate",
   "redBefore",
   "triesLeft",
@@ -262,7 +265,15 @@ export const phaseMachine = setup({
     setup: { on: { CLEAN: "idle", ...ended } },
     // A check that the app refuses (checks.ts runChecks, such as an unaccepted warning) waits with error/app in the baseline too.
     baseline: { on: { CLEAN: "idle", ...ended } },
-    building: { on: { RUN_DONE: "checking", ...cut("building"), ...ended } },
+    // RUN_OPEN: both rows end at idle. continuesLeft clears the way for the next GO; the other row sets the reason unfinished.
+    building: {
+      on: {
+        RUN_DONE: "checking",
+        RUN_OPEN: [{ guard: "continuesLeft", target: "idle" }, { target: "idle" }],
+        ...cut("building"),
+        ...ended,
+      },
+    },
     checking: {
       on: {
         CHECKS_GREEN: "idle",

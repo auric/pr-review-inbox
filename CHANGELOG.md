@@ -16,6 +16,8 @@
 - Archive: at start, the app now clears the tool calls and the raw output of the runs of pull requests archived more than 30 days ago. The findings, drafts, and summaries stay. The Log of such a run says that the app cleared it.
 - PR view: the header has "Approve" and "Needs work" buttons on a pull request where you are a reviewer. They show your current review status, and a second click clears it.
 - Inbox: the row of a reviewed pull request with new commits since the review shows a chip such as "3 new commits". The chip opens the pull request with the review brief for those commits.
+- Build a Jira task: when a build run ends with open tasks, the app now continues it by itself up to two times. "Needs you" with Continue shows only at the third stop, or at once when the part used its cost limit. The Log notes "Continued by the app (1 of 2)." A failed, stopped, or cut run never continues by itself.
+- Build a Jira task: a failed push now shows one plain sentence with a next step. The git output is in the Log only. A branch on the server that blocks the new branch name is named, for example "The server has the branch feature".
 - Build a Jira task: the questions screen has "Copy as Markdown" and "Save .md". They give you the open questions with their options, so you can answer them in your own Claude Code session first.
 - My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."
 - Inbox: the "1 updated · re-sort" chip no longer stays for a pull request that you opened from a link outside the view. Before, a click on the chip did not clear it.
