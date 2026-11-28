@@ -599,11 +599,17 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     pending.tasks.clear();
     for (const r of flushed.splice(0)) r();
   }
+  // A timer can fire some milliseconds early, so the callback checks the spacing again.
+  function tick() {
+    const wait = sentAt + NOTIFY_MS - Date.now();
+    if (wait > 0) timer = setTimeout(tick, wait);
+    else flush();
+  }
   function notify(run: number, pr?: number, task?: number) {
     pending.runs.add(run);
     if (pr !== undefined) pending.prs.add(pr);
     if (task !== undefined) pending.tasks.add(task);
-    if (!timer) timer = setTimeout(flush, Math.max(0, sentAt + NOTIFY_MS - Date.now()));
+    if (!timer) timer = setTimeout(tick, Math.max(0, sentAt + NOTIFY_MS - Date.now()));
   }
 
   // ---------- Pipeline ----------

@@ -24,7 +24,7 @@ These parts of the safety model are in scope:
 
 - The local server listens on 127.0.0.1 only. It checks the Host and Origin of each request, and each change needs a session token.
 - The Bitbucket and Jira tokens go into the OS secret store. They must never go into the database, logs, URLs, or prompts.
-- The `claude` CLI runs only in a sanitized snapshot of the pull request, with read-only tools. It must never run in your clone.
+- Reviews and the other pull request runs use read-only tools in a sanitized snapshot of the pull request. The implement runs of Build a Jira task edit files only in an app-owned worktree of the cache, and they run only the commands that you allow. The `claude` CLI must never run in your clone.
 - Nothing goes to Bitbucket without an explicit user action. PR Review Inbox pushes only on your click. It pushes only to a branch that it created for a Jira task, or to a branch that you picked with "Continue on <branch>". It never pushes to the target branch or to the branch of a pull request that it did not create.
 
 A report that breaks one of these rules is in scope. Examples: a web page that makes the local server act, a token that leaks into a log, or a pull request that makes the CLI write outside the snapshot.

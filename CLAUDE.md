@@ -48,7 +48,8 @@ Commands:
 - `bun run lint`: run Biome lint and format checks. `bun run format` applies the fixes.
 - `bun run demo`: serve the built UI on 127.0.0.1:7399 against a fake Bitbucket and a fake Jira with synthetic data. It uses a temp data folder, memory secrets, and a temp clone for Fix it.
 - `bun test`: run the tests under `tests/`. Each group ends green on typecheck, lint, and test.
-- `bun run check`: run typecheck, typecheck:5, lint, and `bun test` in sequence. It stops at the first failure.
+- `bun run check`: run typecheck, typecheck:5, lint, and `bun test --parallel=8 --timeout 30000` in sequence. It stops at the first failure.
+- `bun run test:serial`: run all tests in one process with a 30 s timeout.
 - `bun run release`: make a tested release in `dist/release/<version>-<commit>/`. It runs check, e2e, compile for all targets, and the compiled-binary test, then writes SHA256SUMS. It refuses a dirty tree unless `--allow-dirty`. `--skip-e2e` skips the e2e tests.
 - `bun run notices`: regenerate `THIRD_PARTY_NOTICES.md` from the Vite source maps, the Bun metafile of the server, the CSS imports, the Bun runtime, and `skills-lock.json`. It fails on a license that is not GPL-compatible. `bun run release` runs it with `--check`. Run it after each dependency or skill change.
 - `bun run screenshots`: build the UI, start the demo on `SHOTS_PORT` (default 7419) in its own temp folder, and write the README images to `docs/screenshots/`. Check each image for real names, hosts, and paths.
