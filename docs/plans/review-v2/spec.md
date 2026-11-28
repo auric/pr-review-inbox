@@ -3162,7 +3162,7 @@ Acceptance criteria:
 1. AC-B187. Settings, Tasks, Run limits has "Runs at once" (default 3, 1 to 10). config.json keeps `runLimits.runsAtOnce` only when it changed. Out of bounds gets 400 "Type a whole number from 1 to 10."
 2. AC-B188. With limit N, N runs on N PRs run at the same time, each as its own CLI process. A start on another PR gets 409 with `full: N`, the oldest pool run, and the full-pool text. After one run ends, the same start gets 202.
 3. AC-B189. While a PR has a running run, a start with another key on that PR gets 409 with no `full` and the PR text, also with free slots. The same key gets 200 and the running run (A14).
-4. AC-B190. Cancel of one run ends only that run. Task Stop ends every run of that task only. A connection change and app stop end every run.
+4. AC-B190. Cancel of one run ends only that run. Task Stop ends every run of that task only. A connection change and app stop end every run. A connection change is a save of Settings that changes the Bitbucket base URL or the signed-in user. A new token for the same base URL and user keeps the runs.
 5. AC-B191. A lower limit applies at the next start and cancels no run. A higher limit lets the next start go at once.
 6. AC-B192. A step of a task with one part at a time takes a pool slot. While the pool is full, it waits with the step text above (limit 1 keeps today's texts) and starts when a pool run ends. Steps of a task with 2 or more parts at once never wait for the pool.
 7. AC-B193. `worktree add` and `worktree prune` of prepareWorkspace and taskSnapshot, nested caches included, wait while another call holds `locked(cache)`. Three runs on three PRs of one repository start at once and all end. After them, `git worktree list` shows no run folder.

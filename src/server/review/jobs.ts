@@ -74,8 +74,10 @@ import { type AutoRead, autoFetch, MAX_KEYS } from "../context/task-fetch";
 import { TASK_FILE, type TaskParents, taskContext, taskParents } from "../context/task-file";
 import type { Live } from "../live";
 import { log } from "../log";
+import { marked } from "../publish/plan";
 import type { Settings } from "../settings";
 import { noteTaskWaits } from "../tasks/notify";
+import { keepTaskLines } from "../tasks/pr";
 import { taskRepos } from "../tasks/repos";
 import { originsOf, type StepShell } from "../tasks/shell";
 import { liveTaskPart, taskPrText } from "../tasks/task-pr";
@@ -2927,7 +2929,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       const store = (p: { title: string; description?: string; version: number }) =>
         db.query(SQL.prText).run({ id, title: p.title, description: p.description ?? null, version: p.version });
       try {
-        const done = await provider.updatePullRequest(ref, { version: input.version, title: input.title, description: input.description });
+        // The AI mark and the task lines follow the rules of the posted comments and the task PR create.
+        const kept = keepTaskLines(db, id, input.description, pr.description);
+        const description = (settings.config()?.markAi ?? true) && kept.trim() ? marked(kept) : kept;
+        const done = await provider.updatePullRequest(ref, { version: input.version, title: input.title, description });
         db.transaction(() => {
           store(done);
           if (input.run !== undefined) db.query(SQL.describeClose).run({ id: input.run, pr: id });

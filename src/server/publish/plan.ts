@@ -27,7 +27,7 @@ export type PlanInput = {
 
 export const AI_MARK = "🤖 ";
 // A body that already starts with the robot emoji gets no second mark.
-const marked = (body: string) => (body.startsWith(AI_MARK.trimEnd()) ? body : AI_MARK + body);
+export const marked = (body: string) => (body.startsWith(AI_MARK.trimEnd()) ? body : AI_MARK + body);
 
 const SEVERITY: Record<Finding["severity"], string> = {
   blocker: "**Blocker:** ",

@@ -31,6 +31,7 @@ import { commitGitlink, noMergeText, pointerTarget } from "./pointer";
 import { type PreflightDeps, preflight } from "./preflight";
 import { failedText, type PushResult, pushTaskBranch } from "./push";
 import { fullPath, type PrRow, prRows, type TaskRepoRow, taskRepos, type UpdateRepo, updateRepos } from "./repos";
+import { liveTaskPart } from "./task-pr";
 import {
   ADOPTED,
   advance,
@@ -128,35 +129,43 @@ const Q = {
   clone: "SELECT path FROM repo_clone WHERE project = $project AND repo = $repo",
 };
 
-// spec.md section 6.9, the PR text: title "<KEY>: <title>", and a description with the goal, the acceptance criteria, and the tests of
-// the plan. The mark follows the markAi setting.
-export function prText(t: Pick<TaskRow, "key" | "title" | "spec_dir">, plan: Plan, mark: boolean, file: string) {
+// The PR text of a task in two pieces. body: the text that the user and Claude may rewrite. tail: the app-owned lines that follow it.
+type TextParts = { title: string; body: string; tail: string };
+const joined = (p: TextParts, mark: boolean) => {
+  const description = `${p.body}\n${p.tail}`;
+  return { title: p.title, description: mark ? AI_MARK + description : description };
+};
+
+function prParts(t: Pick<TaskRow, "key" | "title" | "spec_dir">, plan: Plan, file: string): TextParts {
   const out: string[] = [];
   for (const p of plan.parts) {
     out.push(plan.parts.length > 1 ? `Part ${p.n}: ${p.goal}` : p.goal, "");
     out.push("Acceptance:", ...p.acceptance.map((a) => `- ${a.id} ${a.text}`), "");
     if (p.tests.length) out.push("Tests:", ...p.tests.map((x) => `- ${x.test}: proves ${x.proves.join(", ")}`), "");
   }
-  out.push(`The plan: ${t.spec_dir.replace(/\/+$/, "")}/${file}`);
-  const description = out.join("\n");
-  return { title: `${t.key}: ${t.title}`, description: mark ? AI_MARK + description : description };
+  return { title: `${t.key}: ${t.title}`, body: out.join("\n"), tail: `The plan: ${t.spec_dir.replace(/\/+$/, "")}/${file}` };
+}
+
+// spec.md section 6.9, the PR text: title "<KEY>: <title>", and a description with the goal, the acceptance criteria, and the tests of
+// the plan. The mark follows the markAi setting.
+export function prText(t: Pick<TaskRow, "key" | "title" | "spec_dir">, plan: Plan, mark: boolean, file: string) {
+  return joined(prParts(t, plan, file), mark);
 }
 
 // spec.md section 6.20.6: the PR text of a part of a parts plan. The title and the plan link name the part. The description adds the
 // parent key of a task with sub-tasks, one line with the PR of each part, and a keep-branch sentence for each part that builds on this one
 // (section 6.9).
 // null: the part has no plan part.
-export function subtaskPrText(db: Database, t: TaskRow, partId: number, mark: boolean): { title: string; description: string } | null {
+function subtaskParts(db: Database, t: TaskRow, partId: number): TextParts | null {
   const rows = db.query(Q.list).all({ task: t.id }) as ListRow[];
   const part = rows.find((p) => p.id === partId);
   const docs = part ? partDocsOf(db, t, part) : null;
   if (!part || !docs) return null;
   const names = partNames(t.key, rows);
   const name = (p: ListRow) => names.get(p.id)?.text ?? t.key;
-  const own = prText(
+  const own = prParts(
     { key: names.get(part.id)?.commit ?? t.key, title: part.title, spec_dir: part.spec_dir ?? t.spec_dir },
     docs.parsed,
-    false,
     "plan.md",
   );
   const stateOf = (p: ListRow) => {
@@ -175,20 +184,55 @@ export function subtaskPrText(db: Database, t: TaskRow, partId: number, mark: bo
       p.state !== "merged" &&
       (p.state === "planned" || p.base_branch === part.branch),
   );
-  const description = [
-    own.description,
+  const tail = [
+    own.tail,
     "",
     // self-approved-plans.md section 5.6: a stack plan has no parent issue.
     ...(t.subtasks === 1 ? [`Parent: ${t.key}`] : []),
     live.map((p) => `${name(p)}: ${stateOf(p)}`).join(" · "),
     ...uppers.map((p) => `Please keep this branch until ${name(p)} moves to the new target.`),
   ].join("\n");
-  return { title: own.title, description: mark ? AI_MARK + description : description };
+  return { ...own, tail };
+}
+
+export function subtaskPrText(db: Database, t: TaskRow, partId: number, mark: boolean): { title: string; description: string } | null {
+  const p = subtaskParts(db, t, partId);
+  return p && joined(p, mark);
 }
 
 // The PR text of a part: the text of its part of a parts plan, else the text of the task.
-const textOf = (db: Database, t: TaskRow, part: { id: number }, plan: Plan, mark: boolean) =>
-  (partsPlan(t) ? subtaskPrText(db, t, part.id, mark) : null) ?? prText(t, plan, mark, t.size === "small" ? "plan.md" : "tasks.md");
+const partsOf = (db: Database, t: TaskRow, part: { id: number }, plan: Plan) =>
+  (partsPlan(t) ? subtaskParts(db, t, part.id) : null) ?? prParts(t, plan, t.size === "small" ? "plan.md" : "tasks.md");
+const textOf = (db: Database, t: TaskRow, part: { id: number }, plan: Plan, mark: boolean) => joined(partsOf(db, t, part, plan), mark);
+
+// Write description on a live task PR: the app keeps its own lines. The text loses each line of the current tail. It also loses each
+// line of the old app block: the stored description from its plan link on, as Claude reads it. Its related section goes too. The current
+// tail and the stored related section follow the rest. A leading AI mark stays. Any other PR keeps the text. Without the plan link in the
+// stored text, old part list lines stay, because only the plan link marks the start of the old app block.
+export function keepTaskLines(db: Database, pr: number, text: string, stored: string | null): string {
+  const live = liveTaskPart(db, pr);
+  const t = live && taskRow(db, live.task);
+  const docs = t && docsOf(t);
+  if (!live || !t || !docs) return text;
+  const { tail } = partsOf(db, t, { id: live.part }, docs.parsed);
+  const own = tail.split("\n");
+  const robot = AI_MARK.trimEnd();
+  const unmarked = (s: string) => (s.startsWith(robot) ? s.slice(robot.length).trimStart() : s);
+  const before = splitRelated(stored ?? "");
+  const old = unmarked(before.body).split("\n");
+  const at = old.lastIndexOf(own[0] as string);
+  const app = new Set([...own, ...(at >= 0 ? old.slice(at) : [])].filter((l) => l.trim()));
+  // A copy of the marked first line of the stored text loses the mark, so the mark stays only at the start.
+  const first = before.body.split("\n")[0] as string;
+  const mine = splitRelated(text).body;
+  const body = unmarked(mine)
+    .split("\n")
+    .filter((l) => !app.has(l.trimEnd()))
+    .map((l) => (first.startsWith(robot) && l === first ? unmarked(l) : l))
+    .join("\n")
+    .trim();
+  return (mine.startsWith(robot) ? AI_MARK : "") + (body ? `${body}\n\n${tail}` : tail) + before.related;
+}
 
 // spec.md section 6.20.6: the PR target of a part with its own base, else the task base. The push guard takes the key of the part.
 const targetOf = (t: TaskRow, part: Pick<PartRow, "base_branch" | "base_commit">) =>
@@ -209,12 +253,17 @@ const movedFirst = (db: Database, t: TaskRow, part: PartRow) => {
 // spec.md section 6.16.8, Links: the description without an earlier link section, then "Related PRs:" and one line per other PR of the
 // task, with its link when Bitbucket gave one of the configured origin.
 export function withRelated(description: string, others: { name: string; id: number; url?: string | undefined }[]): string {
-  const text = description.replaceAll("\r\n", "\n");
-  const at = text.lastIndexOf(`\n\n${RELATED}\n`);
-  const body = (at >= 0 ? text.slice(0, at) : text).trimEnd();
+  const { body } = splitRelated(description);
   if (!others.length) return body;
   const lines = others.map((o) => (o.url ? `- [${o.name} #${o.id}](${o.url})` : `- ${o.name} #${o.id}`));
   return `${body}\n\n${RELATED}\n${lines.join("\n")}`;
+}
+
+// A description without and with its last link section. related: "" or the section with its leading blank line.
+function splitRelated(description: string): { body: string; related: string } {
+  const text = description.replaceAll("\r\n", "\n");
+  const at = text.lastIndexOf(`\n\n${RELATED}\n`);
+  return at >= 0 ? { body: text.slice(0, at).trimEnd(), related: text.slice(at).trimEnd() } : { body: text.trimEnd(), related: "" };
 }
 
 // The sentence of a push that did not happen, or null after the push.

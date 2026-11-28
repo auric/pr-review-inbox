@@ -11,19 +11,24 @@ import { join } from "node:path";
 import { createApp } from "../../src/server/app";
 import { writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
+import { AI_MARK } from "../../src/server/publish/plan";
 import { DESCRIBE_RULES, describeAgent, type Profile, SHIPPED_PROFILES } from "../../src/server/review/catalog";
 import { createReviewJobs, DESCRIBE_OPEN_ONLY, DESCRIBE_OWN_ONLY } from "../../src/server/review/jobs";
 import { buildDescribePrompt, type PromptInput } from "../../src/server/review/prompt";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
+import { renderDocs, toPlan } from "../../src/server/tasks/plan";
+import { subtaskPrText } from "../../src/server/tasks/pr";
+import { type TaskRow, taskRow } from "../../src/server/tasks/tasks";
 import type { ApiError, DescribeDto, DescriptionConflict, RunDetail, RunDto } from "../../src/shared/dto";
 import { describeJsonSchema, describeResult } from "../../src/shared/review";
+import { specResult } from "../../src/shared/task";
 import { FAKE_TOKEN, FAKE_USER, key, repoWrites, startFakeBitbucket } from "../support/fake-bitbucket";
-import { type FakeScenario, readRecords } from "../support/fake-claude";
+import { echoSpec, type FakeScenario, readRecords } from "../support/fake-claude";
 import { claudeStream, fakeRunner, reviewRemote, stubListTools } from "../support/review-fixture";
 
-for (const m of ["jobs", "catalog", "prompt"])
-  console.log(`describe.test.ts imported from ${Bun.resolveSync(`../../src/server/review/${m}`, import.meta.dir)}`);
+for (const m of ["review/jobs", "review/catalog", "review/prompt", "tasks/pr", "publish/plan"])
+  console.log(`describe.test.ts imported from ${Bun.resolveSync(`../../src/server/${m}`, import.meta.dir)}`);
 
 process.env.REVIEW_LOOP_SECRETS = "memory";
 const SLOW = 120_000;
@@ -80,7 +85,7 @@ describe("describe schema and prompt", () => {
   });
 });
 
-async function setup(role: "AUTHOR" | "REVIEWER", state = "OPEN") {
+async function setup(role: "AUTHOR" | "REVIEWER", state = "OPEN", markAi?: boolean) {
   const root = mkdtempSync(join(tmpdir(), "rl-desc-"));
   dirs.push(root);
   const remote = await reviewRemote(root, { 2: "source" });
@@ -105,7 +110,7 @@ async function setup(role: "AUTHOR" | "REVIEWER", state = "OPEN") {
   expect(created.status).toBe(201);
   forge.writes.length = 0;
   const dir = join(root, "data");
-  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false });
+  writeConfig(dir, { baseUrl: fake.url, userSlug: FAKE_USER, notifications: false, ...(markAi !== undefined && { markAi }) });
   const secrets = createSecrets(null);
   await secrets.set(FAKE_TOKEN);
   const settings = createSettings({ dir, secrets });
@@ -185,9 +190,9 @@ describe("describe runs", () => {
       expect(ok.status).toBe(200);
       expect(ok.body.version).toBe(1);
       expect(h.forge.writes.map((w) => [w.method, w.path, w.body.version, w.body.title, w.body.description])).toEqual([
-        ["PUT", `${h.forge.path}/pull-requests/101`, 0, "Edited title", "Edited text."],
+        ["PUT", `${h.forge.path}/pull-requests/101`, 0, "Edited title", `${AI_MARK}Edited text.`],
       ]);
-      expect(h.row()).toEqual({ title: "Edited title", description: "Edited text.", pr_version: 1 });
+      expect(h.row()).toEqual({ title: "Edited title", description: `${AI_MARK}Edited text.`, pr_version: 1 });
       // The proposal closes after the update.
       expect((await h.get()).body?.result).toBeNull();
     },
@@ -281,6 +286,83 @@ describe("describe runs", () => {
       const r = await h.update({ version: 0, title: "  ", description: "x" });
       expect(r.status).toBe(400);
       expect(h.forge.writes).toEqual([]);
+    },
+    SLOW,
+  );
+
+  test(
+    "the AI mark follows the markAi setting: off adds none, and a text that has the mark keeps one",
+    async () => {
+      const off = await setup("AUTHOR", "OPEN", false);
+      expect((await off.update({ version: 0, title: "T", description: "Plain." })).status).toBe(200);
+      expect(off.forge.writes.at(-1)?.body.description).toBe("Plain.");
+      const on = await setup("AUTHOR");
+      expect((await on.update({ version: 0, title: "T", description: `${AI_MARK}Marked.` })).status).toBe(200);
+      expect(on.forge.writes.at(-1)?.body.description).toBe(`${AI_MARK}Marked.`);
+    },
+    SLOW,
+  );
+
+  test(
+    "a task PR keeps its plan link, part list, and related links once, and a stale part list goes",
+    async () => {
+      const h = await setup("AUTHOR");
+      const spec = specResult.parse({
+        ...echoSpec(),
+        title: "Two parts",
+        map: ["one", "two"].map((name) => ({ path: `src/${name}.ts`, line: null, symbol: "", kind: "change", what: `The ${name}.` })),
+        parts: ["one", "two"].map((name, i) => ({
+          n: i + 1,
+          kind: "part",
+          title: `Part ${name}`,
+          goal: `The ${name} works.`,
+          lines: 20,
+          acceptance: [{ id: "A1", text: `The ${name} works.` }],
+          tests: [{ test: `tests/${name}.test.ts`, proves: ["A1"] }],
+          tasks: [{ id: "T1", title: `Write ${name}`, files: [`src/${name}.ts`], run: [`tests/${name}.test.ts`], done: "Done." }],
+        })),
+      });
+      const plan = toPlan(spec, "c".repeat(40), [false, false], []);
+      const docs = { ...renderDocs("ABC-10", "Two parts", "small", plan), version: 1, parsed: plan, approved: true };
+      const { id: task } = h.db
+        .query(
+          `INSERT INTO task (project, repo, key, title, state, size, target_branch, spec_dir, docs_json, subtasks, created_at, updated_at)
+          VALUES ('PROJ', 'repo', 'ABC-10', 'Two parts', 'implementing', 'small', 'main', 'specs/ABC-10/', $docs, 1, 1, 1) RETURNING id`,
+        )
+        .get({ docs: JSON.stringify(docs) }) as { id: number };
+      const part = (ord: number, pr: number | null, remote: number | null, state: string) =>
+        (
+          h.db
+            .query(
+              `INSERT INTO task_part (task, ord, kind, title, branch, base_branch, pr, remote_pr, state, keys_json, created_at, updated_at)
+              VALUES ($task, $ord, 'part', $title, $branch, 'main', $pr, $remote, $state, $keys, 1, 1) RETURNING id`,
+            )
+            .get({ task, ord, pr, remote, state, title: `Part ${ord}`, branch: `b${ord}`, keys: JSON.stringify([`ABC-1${ord}`]) }) as {
+            id: number;
+          }
+        ).id;
+      const p1 = part(1, h.pr, 101, "pr_open");
+      const p2 = part(2, null, null, "planned");
+      const related = "\n\nRelated PRs:\n- [PROJ/lib #7](https://forge.invalid/7)";
+      // The text that the PR create gave: part 2 had no PR then.
+      const created = `${(subtaskPrText(h.db, taskRow(h.db, task) as TaskRow, p1, true) as { description: string }).description}${related}`;
+      expect(created).toContain("ABC-11: this PR · ABC-12: next");
+      h.db.query("UPDATE pull_request SET description = $d WHERE id = $id").run({ d: created, id: h.pr });
+      h.db.query("UPDATE task_part SET remote_pr = 102, state = 'pr_open' WHERE id = $id").run({ id: p2 });
+      const tail = "The plan: specs/ABC-10/plan.md\n\nParent: ABC-10\nABC-11: this PR · ABC-12: #102 (in review)";
+      // Claude keeps the old text below its own and moves the plan link up.
+      const text = `The plan: specs/ABC-10/plan.md\n\n## What changed and why\n\nTwo parts.\n\n${created}`;
+      expect((await h.update({ version: 0, title: "T", description: text })).status).toBe(200);
+      const put = h.forge.writes.at(-1)?.body.description as string;
+      const count = (x: string) => put.split(x).length - 1;
+      expect(put.startsWith(`${AI_MARK}## What changed and why\n\nTwo parts.`)).toBe(true);
+      expect(put.endsWith(`\n\n${tail}${related}`)).toBe(true);
+      for (const x of ["The plan: ", "Parent: ABC-10", "ABC-11: this PR", "Related PRs:", "#7](", AI_MARK.trimEnd()])
+        expect([x, count(x)]).toEqual([x, 1]);
+      expect(put).not.toContain("ABC-12: next");
+      // An update of the stored text changes nothing.
+      expect((await h.update({ version: 1, title: "T", description: put })).status).toBe(200);
+      expect(h.forge.writes.at(-1)?.body.description).toBe(put);
     },
     SLOW,
   );

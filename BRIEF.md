@@ -174,7 +174,7 @@ Bitbucket webhooks cannot reach a laptop on localhost. The app polls the REST AP
 - For a task that builds sub-tasks, the spec run also reads the branches that name each sub-task key, the open PRs of the repository, the changed paths of each tracked PR, and the newest merged PRs of the repository. These calls are GET only.
 - Every spec run of a task also reads the branch search for the task key and its parent key. It also reads one page of open PRs and one page of merged PRs (spec section 6.22.4). These calls are GET only.
 - Release 3: a Download click also calls Jira. The attachment download follows same-origin redirects only, at most 3 hops. It checks the origin and the base path on each hop. A cross-origin redirect is an error, so the token never leaves the Jira origin.
-- Review status and PR text: two more Bitbucket writes occur only on a user click. Each write goes once, with no retry. Approve and Needs work in the PR header set the review status of the token user. They act only when that user is a reviewer of the PR (POST or DELETE `.../approve`, PUT `.../participants/{slug}`). "Update on Bitbucket" of Write description sends one PUT with the title and the description of the user's own open PR. The PUT carries the stored PR version, so Bitbucket refuses it with 409 after a newer edit.
+- Review status and PR text: two more Bitbucket writes occur only on a user click. Each write goes once, with no retry. Approve and Needs work in the PR header set the review status of the token user. They act only when that user is a reviewer of the PR (POST or DELETE `.../approve`, PUT `.../participants/{slug}`). "Update on Bitbucket" of Write description sends one PUT with the title and the description of the user's own open PR. The PUT carries the stored PR version, so Bitbucket refuses it with 409 after a newer edit. With the AI mark setting on, the description starts with the mark of the posted comments. A live task PR keeps the plan link, the part list, and the related PR links that the app wrote.
 - Release 3: the app runs git in the user's clone only on a clone check, Apply, and Undo. It runs no git network command there. Apply and the confirm of a post call Bitbucket once for the live PR state.
 - Review v2 part 6 (decision Q3): `git push` and PR create or update go to Bitbucket only on a click. A push goes only to a branch that the task created, or to a branch with the Jira key of its part that the user picked with "Continue on <branch>". It never goes to the target branch or to the branch of a PR that the app tracks but did not create. It always has an explicit `--force-with-lease`. The refspec never has a `+`, because git then ignores the lease. The app refuses any other refspec before git runs. A normal push must be a fast-forward of the last pushed commit, else the app asks for a force. A force push after a rebase needs a confirm and keeps the lease, so it never overwrites a colleague's newer push. "Update from <base>" (decision Q53) rebases only before the first push and merges after it, so it never needs a force push. After a squash merge of a lower part, the update merges the base in three steps (spec section 6.20.10). The app never force-pushes after the first push. The push runs from the cache, not from the user's clone. The token goes in the GIT_CONFIG env, never in argv, the worktree, or logs. The token needs Repository write. The token header goes only to the server origin (`http.<origin>/.extraHeader`). Before each git call with the token, the app reads the cache config files and refuses a key outside its allowlist, such as `url.*.insteadOf` (spec section 6.8). The allowlist holds the keys of git init, sparse checkout, the app, and `git submodule init`.
 - A command that Claude runs (spec section 6.21) can reach any host that the allowlist, Most commands, or Unrestricted lets it reach. The deny list refuses the Bitbucket and Jira hosts.
@@ -321,7 +321,7 @@ Acceptance scenarios:
 
 Edge cases: the code host is unreachable (show the last known state, mark it offline, and retry); the token expires or lacks permission (show a clear message); the pull request changes during a review (label the result with the reviewed commits and mark it stale); a finding points to a line outside the diff (post it in the general comment); the AI returns unreadable output (mark the review failed and keep the raw output; at most one repair attempt); the AI usage limit is reached (show the message from the AI tool and do not retry automatically).
 
-Out of scope now: automatic reviews, approvals and merges from the tool, team dashboards, other code hosts, mobile.
+Out of scope now: automatic reviews, automatic approvals, merges from the tool, team dashboards, other code hosts, mobile. Approve and Needs work act only on the user's click (section 3.6).
 ```
 
 ## 7. Paste into /speckit-plan
@@ -642,7 +642,7 @@ The tracking half needs code. Until M1 exists, ask Claude Code "Which of my open
 
 Phase 2, close the loop:
 - Ask the PR: moved to Release 2 (section 2). Done: Review v2 part 2 added follow-ups. Each follow-up gets the last three turns in its prompt and resumes no session.
-- Approve and Needs work buttons.
+- Done (2026-11-28): Approve and Needs work buttons in the PR header. They act only on the user's click.
 - A "My open threads" view across all PRs, with unresolved tasks.
 - Snooze a thread, personal reminders, and a deterministic daily digest.
 
@@ -650,7 +650,7 @@ Phase 3, author mode (my own PRs):
 - Self-review before I open a PR: partly moved to Review v2 part 6 (the own review of each task part).
 - A digest of incoming feedback, grouped by topic.
 - Draft fixes for accepted feedback: moved to Release 3 as Fix it (section 2). I review, apply, and push. Review v2 part 6 builds new code from a Jira task.
-- Draft a PR description from the commits and the Jira issue.
+- Done (2026-11-28): Write description drafts the PR title and description from the diff, the commits, and the linked task. Only "Update on Bitbucket" posts it.
 
 Phase 4, better reviews:
 - Done: "Use skill X" in a profile. Runs copy the skills and the model reads them with Read (section 7, Profile skills).
