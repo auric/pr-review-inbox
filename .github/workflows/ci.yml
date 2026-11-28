@@ -57,7 +57,8 @@ jobs:
           key: tsc-${{ runner.os }}-${{ hashFiles('bun.lock', 'tsconfig.json') }}-${{ github.sha }}
           restore-keys: tsc-${{ runner.os }}-${{ hashFiles('bun.lock', 'tsconfig.json') }}-
       # The compiled-binary test skips, because dist/bin does not exist on a fresh checkout.
-      - run: bun run check
+      # The runner has few cores, so the tests run in one process. bun run check runs them with 8 workers.
+      - run: bun run typecheck && bun run typecheck:5 && bun run lint && bun run test:serial
       - run: bun run notices --check
 
   # Windows runs only the tests that depend on the OS (scripts/ci-tests.ts). Typecheck, lint, and notices do not depend on the OS.

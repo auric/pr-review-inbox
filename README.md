@@ -433,7 +433,7 @@ If the OS secret store fails, PR Review Inbox keeps the token in memory only and
 | Command | Effect |
 |---|---|
 | `bun run dev` | Hono with `--watch` on 127.0.0.1:7317 and Vite on 127.0.0.1:5173. Open the Vite URL. |
-| `bun run check` | Typecheck with TypeScript 7 and 5, Biome lint, and `bun test`. |
+| `bun run check` | Typecheck with TypeScript 7 and 5, Biome lint, and `bun test` with 8 parallel workers. `bun run test:serial` runs the tests in one process. |
 | `bun run test:e2e` | Build the UI and run the Playwright suite against a fake Bitbucket and a fake Jira. |
 | `bun run demo` | Serve the built UI on 127.0.0.1:7399 with synthetic data, a fake CLI, and a temp data folder. |
 | `bun run compile` | Build one self-contained binary for this host in `dist/bin/pr-review-inbox-<os>-<arch>`. |

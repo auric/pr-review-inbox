@@ -1,3 +1,3 @@
 [test]
 root = "tests"
-preload = ["./tests/support/no-real-claude.ts"]
+preload = ["./tests/support/no-real-claude.ts", "./tests/support/test-env.ts"]

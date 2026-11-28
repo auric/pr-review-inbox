@@ -16,6 +16,8 @@ export type FakeScenario = {
   authExit?: number;
   fixture?: string;
   delayMs?: number;
+  // After the init line, wait until this file exists, by path relative to the folder of the record file. The run exits with 1 after 60 s.
+  waitFile?: string;
   exitCode?: number;
   stderr?: string;
   // Start a child that ignores stdin EOF, stop before the first result event, and wait forever.
@@ -777,11 +779,26 @@ async function main() {
     typeof init?.cwd === "string"
       ? l.replaceAll(esc(`${init.cwd}\\`), esc(process.cwd() + sep)).replaceAll(esc(init.cwd), esc(process.cwd()))
       : l;
-  if (initAt < 0) await emit();
+  const gate = async () => {
+    if (!s.waitFile) return;
+    const f = join(dirname(s.record), s.waitFile);
+    for (const end = Date.now() + 60_000; !existsSync(f); await Bun.sleep(20))
+      if (Date.now() > end) {
+        await Bun.write(Bun.stderr, `fake-claude: ${f} did not appear in 60 s.\n`);
+        process.exit(1);
+      }
+  };
+  if (initAt < 0) {
+    await emit();
+    await gate();
+  }
   for (const [k, l] of lines.entries()) {
     if (s.hang && JSON.parse(l).type === "result") break;
     await out(placed(l));
-    if (k === initAt) await emit();
+    if (k === initAt) {
+      await emit();
+      await gate();
+    }
     await Bun.sleep(s.delayMs ?? 2);
   }
   if (s.stderr) await Bun.write(Bun.stderr, s.stderr);

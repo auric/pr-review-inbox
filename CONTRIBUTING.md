@@ -16,7 +16,7 @@ You do not need a Bitbucket server or the `claude` CLI for development. `bun run
 
 | Command | Effect |
 |---|---|
-| `bun run check` | Typecheck with TypeScript 7 and 5, Biome lint, and `bun test`. Each change must pass it. |
+| `bun run check` | Typecheck with TypeScript 7 and 5, Biome lint, and `bun test` with 8 parallel workers. Each change must pass it. `bun run test:serial` runs the tests in one process. |
 | `bun run test:e2e` | Build the UI and run the Playwright suite against the fakes. Stop `bun run demo` first, because both use port 7399. |
 | `bun run lint` | Biome lint and format checks. `bun run format` applies the fixes. |
 | `bun run screenshots` | Regenerate `docs/screenshots/` from the demo. Run it after a visible UI change. |

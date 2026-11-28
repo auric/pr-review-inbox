@@ -510,19 +510,26 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
     },
   });
   const testFile = (n: string) => file(`tests/${n}.test.ts`, `test("${n}", () => {});\n`).writes[0] as { path: string; text: string };
-  // BUILD with a first build run of each part. Every part starts its build run before the first one ends, so the delays order the
-  // reasons: part 1, then part 2, then part 3.
+  // BUILD with a first build run of each part. The first build run of each part waits after its init line for the file go-<name>.
   const firstTests = (first: Record<string, object>): Scenario => ({
     match: BUILD.match.map((m, i) => {
       const n = NAMES[i] as string;
-      const delayMs = 4000 + 1500 * i;
-      return { ...m, seq: { ...m.seq, "implement:build": [{ delayMs, ...first[n] }, ...m.seq["implement:build"]] } };
+      return { ...m, seq: { ...m.seq, "implement:build": [{ waitFile: `go-${n}`, ...first[n] }, ...m.seq["implement:build"]] } };
     }),
     taskReview: CLEAN,
   });
   const reasons = (s: Awaited<ReturnType<typeof setup>>): (TaskBlocked | null | undefined)[] => {
     const d = taskDto(s.db, s.t());
     return [d.blocked, ...d.parts.map((p) => p.blocked)];
+  };
+  // Every part starts its build run before the first one ends. Then the runs end one at a time, part 1, then part 2, then part 3, each
+  // after the reason of the part before it is stored.
+  const releaseInOrder = async (s: Awaited<ReturnType<typeof setup>>) => {
+    await until(() => s.implementRuns().length === 3);
+    for (const [i, n] of NAMES.entries()) {
+      writeFileSync(join(s.root, `go-${n}`), "");
+      await until(() => reasons(s).filter(Boolean).length === i + 1);
+    }
   };
   const partOfStep = (s: Awaited<ReturnType<typeof setup>>, step: number | null | undefined) =>
     (s.db.query("SELECT part FROM task_step WHERE id = $id").get({ id: step ?? 0 }) as { part: number } | null)?.part;
@@ -541,6 +548,7 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       });
       const first = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
       first.loop.build(s.db, s.task);
+      await releaseInOrder(s);
       await first.loop.idle(s.task);
       const [b, w1, w2, w3] = reasons(s);
       expect(b).toMatchObject({ kind: "question", text: "Needs you: Claude asks: Keep the name one?" });
@@ -611,6 +619,7 @@ describe("reasons of parts that build at the same time (spec.md section 6.25)", 
       });
       const { loop } = s.apps[0] as { jobs: ReviewJobs; loop: TaskLoop };
       loop.build(s.db, s.task);
+      await releaseInOrder(s);
       await loop.idle(s.task);
       const [b, , w2, w3] = reasons(s);
       expect(b?.kind).toBe("denied_path");
