@@ -288,3 +288,26 @@ Variant "git-history" (prompt 2.9+git-history, code d3cda25), the fixed 10-case 
 - 4 of 25 findings cite an earlier commit: 3 confirmed, 1 refuted.
 - Verdict: FAIL per git-history.md section 5, because grounded recall is below the subset baseline. git-history stays opt-in, and no full run follows.
 - Guess, not measured: the history reads take turns from the bug search.
+
+### 2026-11-27: pilot of effort low on the natural set (E-LOW)
+
+Shipped prompt 2.9 with --effort low and --reviewer-effort low (code a8e0ca3), the fixed 10-case natural subset of the lenses3 run, repeat 1, 10 runs (9 complete, 1 incomplete, 0 failed). Verify stayed at medium. The control is the same 10 cases of baseline r6 (20 runs, effort medium):
+
+| Metric | Baseline | effort low |
+|---|---|---|
+| Cost per case run | $1.59 | $0.60 (0.38x), $5.96 total |
+| Minutes per case run | 4.2 | 1.4 (0.33x) |
+| Grounded recall | 35.7% (10/28) | 14.3% (4/28) |
+| Candidate recall | 39.3% | 10.7% |
+| Precision | 40.9% | 50.0% |
+| Grounded noise per case | 1.25 | 0.20 (pass) |
+| Judge fp per case run | 0.30 | 0.00 (pass) |
+| Severity ok | 100% | 100% |
+
+- Paired delta of grounded recall: −21.4 points, 90% interval −29.3 to −9.5 (8 PR groups, 28 must-finds). The interval excludes zero.
+- The find phase did much less work: 6.8 turns per run against 22.2, 7.4 tool calls against 26.3, and 281 thinking tokens against 5,003. The finder opened the file of 35.7% of the must-finds against 83.9%.
+- The noise rule passes only because the run showed fewer findings. New judge tp per case fell from 0.95 to 0.20.
+- The incomplete run holds 2 of 28 must-finds, so it cannot change the result.
+- The result files record effort low for the main agent and the rl-reviewer profile. The call records carry no effort field, so the reviewer effort is not observable. rl-reviewer ran in 2 of 10 case runs.
+- Verdict: FAIL. Grounded recall is below the subset baseline, and the point delta is below the proposed D1 stop line of −10 points. Low effort does not ship for the finder, and the full M5 run of E-LOW does not follow.
+- The twice-lite reading of M5 (union with a low run) is not measured.
