@@ -2856,7 +2856,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### devlop 1.1.0
 
-License: MIT. Ships in the compiled binary.
+License: MIT. Ships in the web bundle, compiled binary.
 
 license:
 
