@@ -27,6 +27,7 @@ import { ago } from "../shell/model";
 import { CheckBanner } from "../states";
 import { fullTime, Text } from "./Thread";
 import type { ThreadModel } from "./threads";
+import { DescribePanel, WriteDescriptionButton } from "./WriteDescription";
 
 export const STATUS_TEXT: Record<string, string> = { APPROVED: "Approved", NEEDS_WORK: "Needs work", UNAPPROVED: "Not reviewed" };
 
@@ -34,8 +35,15 @@ const h2 = "m-0 flex items-baseline gap-2 text-[15px] font-bold tracking-[-0.005
 const linkish = "rl-hit inline-flex w-fit items-center gap-1 rounded text-sm font-medium text-pen hover:underline";
 
 // Plan pr-view-v4 2.5: the author's text, the reviewers, and the notices. The runner's summary is in the run record.
-export function Description({ detail, me }: { detail: PrDetail; me: string | null }) {
+// describe: the props of Write description. It shows on an own open PR only.
+export function Description(props: {
+  detail: PrDetail;
+  me: string | null;
+  describe?: { runner: string; forge: string; announce: (text: string) => void };
+}) {
+  const { detail, me } = props;
   const { pr, description } = detail;
+  const describe = pr.role === "AUTHOR" && pr.state === "OPEN" ? props.describe : undefined;
   const [more, setMore] = useState(false);
   const text = description?.trim() ?? "";
   const blocks = text.split(/\n\s*\n/);
@@ -47,9 +55,12 @@ export function Description({ detail, me }: { detail: PrDetail; me: string | nul
       aria-labelledby="h-desc"
       className="grid max-w-[86ch] scroll-mt-3 grid-cols-[minmax(0,1fr)] justify-items-start gap-2.5 pt-6"
     >
-      <h2 id="h-desc" className={h2}>
-        Description
-      </h2>
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 id="h-desc" className={h2}>
+          Description
+        </h2>
+        {describe && <WriteDescriptionButton pr={pr.id} {...describe} />}
+      </div>
       {!pr.followed && (
         <p className="m-0 text-muted-foreground">Not followed. PR Review Inbox does not check this pull request for new comments.</p>
       )}
@@ -67,6 +78,7 @@ export function Description({ detail, me }: { detail: PrDetail; me: string | nul
           {more ? "Show less" : "Show more"}
         </button>
       )}
+      {describe && <DescribePanel pr={pr.id} {...describe} />}
       <CheckBanner checkpoint={pr.checkpoint} />
       {pr.reviewers.length > 0 && (
         <dl className="m-0 mt-1.5 grid max-w-[72ch] grid-cols-[max-content_minmax(0,1fr)] gap-x-[18px] gap-y-2">

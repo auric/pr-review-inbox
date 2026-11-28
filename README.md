@@ -30,6 +30,7 @@ The name says what the app does. It is one inbox for the pull requests that you 
 - Turns findings into drafts with a severity. You accept, edit, or discard each one, then post them as inline comments.
 - Drafts replies to the threads where it is your turn. On your own pull request, it proposes fixes that you review before they touch your clone.
 - Explains a pull request on its own page: what to read first, a walkthrough with links into the diff and diagrams, and the risks on their code.
+- Writes the title and the description of your own pull request. You edit the proposal. It goes to Bitbucket only when you click "Update on Bitbucket".
 - Builds a Jira task: Claude asks a few questions, writes a short plan, and builds the code with tests in a copy of the repository that the app owns. The pull request opens only when you click.
 - Lists what the review did not check, so a gap never looks like a pass.
 
@@ -205,6 +206,12 @@ Press `w`, or click "Explain this PR", to open the walkthrough page of the pull 
 </picture>
 
 ![The large view of a diagram with Zoom out, the zoom in percent, Zoom in, Fit, and 100%](docs/screenshots/diagram-zoom.webp)
+
+### Write description
+
+On your own open pull request, click "Write description" beside the Description heading. Claude runs on a sanitized snapshot with read-only tools. It reads the diff, the commit messages, the linked Jira task, and your current description. It proposes a title and a Markdown description with three sections: what changed and why, how to test, and risks. The prompt tells Claude to keep the parts of your description that are still true. It also tells Claude to base each statement on the code, the commits, or the task. You edit the title and the text in the form under the description. "Update on Bitbucket" writes both to the pull request. "Discard" closes the proposal and posts nothing. Someone can change the pull request in Bitbucket after the app read it. Then the app says so and loads the current text. Check it, then click "Update on Bitbucket" again.
+
+![The proposed title and description under the Description heading of an own pull request, with Update on Bitbucket and Discard](docs/screenshots/describe.webp)
 
 ### Build a Jira task
 

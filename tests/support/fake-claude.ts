@@ -40,6 +40,8 @@ export type FakeScenario = {
   verify?: unknown;
   explain?: unknown;
   discuss?: unknown;
+  // Write description (properties.title and properties.description). Absent: the echo.
+  describe?: unknown;
   // Part 6 (spec.md section 6.5): interview (properties.done and properties.questions) and spec (properties.map) results. Absent: the
   // echo.
   interview?: unknown;
@@ -279,6 +281,13 @@ export const echoExplain = () => ({
   risks: [],
   glossary: [],
   questions: [],
+  coverage: NO_COVERAGE,
+});
+
+// A describe result. The title names the head commit of the "# Task" line, so a test can tell two runs apart.
+export const echoDescribe = (stdin: string) => ({
+  title: `Echo title ${/\.\.(\w{7})/.exec(stdin)?.[1] ?? ""}`.trim(),
+  description: "## What changed and why\n\nEcho: the change.\n\n## How to test\n\nRun the tests.\n\n## Risks\n\nNone found.",
   coverage: NO_COVERAGE,
 });
 
@@ -709,6 +718,7 @@ async function main() {
     if (props.replies !== undefined) return s.replies ?? echoReplies(stdin, { notes: s.notes, cites: s.cites });
     if (props.earlier !== undefined) return s.rereview ?? echoRereview(stdin, fixture);
     if (props.answer !== undefined) return s.answer ?? echoAnswer(stdin);
+    if (props.title !== undefined && props.description !== undefined) return s.describe ?? echoDescribe(stdin);
     if (props.edits !== undefined) return s.fix ?? echoFix(stdin);
     if (props.reasons !== undefined) return s.improve ?? echoImprove(stdin);
     if (props.answers !== undefined) return s.consult ?? echoConsult(stdin, props.fix !== undefined);

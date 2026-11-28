@@ -21,6 +21,7 @@ export const STICKY: ReadonlySet<ContextErrorKind> = new Set(["auth", "forbidden
 export const READS: Record<RunKind, "refresh" | "missing" | null> = {
   review: "refresh",
   explain: "refresh",
+  describe: "refresh",
   ask: "missing",
   reply: "missing",
   fix: "missing",

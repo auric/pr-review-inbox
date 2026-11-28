@@ -445,6 +445,26 @@ const TASK_REPAIRED = {
   repairs: [{ id: "p1", fixed: true, note: "T1 now releases the lock in a finally block." }],
 };
 
+// Write description on the own PR "Release the write lock after each entry".
+const DESCRIBE = {
+  title: "[ABC-10688] Release the write lock after each entry",
+  description: [
+    "## What changed and why",
+    "",
+    "`flush()` now takes the cache lock for each entry and releases it after the write. Before, one lock covered the whole batch, so a slow write blocked every reader.",
+    "",
+    "## How to test",
+    "",
+    "- Run `bun test tests/cache/flush.test.ts`.",
+    "- Flush a batch of 1000 entries and read the cache in parallel. Reads no longer wait for the whole batch.",
+    "",
+    "## Risks",
+    "",
+    "- A reader can see a part of a batch. No caller relies on a whole batch today.",
+  ].join("\n"),
+  coverage: READ_FLUSH,
+};
+
 // The verify phase of a review run gets one tool call and no subagent (docs/plans/review-v2/spec.md section 1.6).
 const NO_AGENTS = claudeStream(claudeDir, "check", "claude-synthetic/review-flat.jsonl");
 runner.write({
@@ -453,6 +473,7 @@ runner.write({
   answered: ANSWERED,
   verify: VERIFY,
   explain: EXPLAIN,
+  describe: DESCRIBE,
   discuss: DISCUSS,
   interview: TASK_INTERVIEW,
   spec: TASK_SPEC,
@@ -1031,6 +1052,14 @@ for (const [pr, list] of activities) {
   fake.routes[key("GET", pathOf(pr))] = () => {
     const state = phase === 2 ? closed.get(pr) : undefined;
     return { status: 200, body: state ? { ...pr, state, updatedDate: min(15) } : pr };
+  };
+  // Write description: Update on Bitbucket. Version + 1, or 409 on a stale version, as Gate G4 recorded it.
+  fake.routes[key("PUT", pathOf(pr))] = async (req) => {
+    const body = (await req.json()) as { version?: number; title?: string; description?: string };
+    const cur = pr as unknown as { version: number; title: string; description?: string };
+    if (body.version !== cur.version) return { status: 409, body: { errors: [{ message: "The pull request version is out of date." }] } };
+    Object.assign(cur, { title: body.title ?? cur.title, description: body.description ?? cur.description, version: cur.version + 1 });
+    return { status: 200, body: pr };
   };
 }
 

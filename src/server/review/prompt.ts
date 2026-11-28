@@ -248,6 +248,17 @@ export function buildAskPrompt(i: PromptInput & { question: string; conversation
   ].join("\n");
 }
 
+// Write description: the caller passes an empty note. The current PR text stays in ./context/pr.md.
+export function buildDescribePrompt(i: PromptInput): string {
+  return [
+    "# Task",
+    "",
+    `Write the title and the description of the pull request for the change ${i.mergeBase}..${i.head} in ./repo. Give the title, the description, and the coverage.`,
+    "",
+    ...common(i),
+  ].join("\n");
+}
+
 // docs/plans/review-v2/spec.md section 2.4: one turn of a talk about a finding. The message of the user is the only content of
 // "Your instructions", as the question of Ask. The finding and the earlier turns stay in ./context.
 export function buildDiscussPrompt(i: PromptInput & { message: string }): string {

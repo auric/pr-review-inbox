@@ -34,7 +34,9 @@ import {
   confidences,
   copyPairs,
   type Defect,
+  type DescribeResult,
   type DiscussResult,
+  describeResult,
   discussResult,
   displayGroup,
   type ExplainResult,
@@ -125,6 +127,7 @@ export type Ending = {
     carried?: Map<number, CarriedMark>;
     notes?: NoteProposal[];
     explain?: ExplainResult;
+    describe?: DescribeResult;
     discuss?: DiscussResult;
     // A task run (docs/plans/review-v2/spec.md section 6.5): the parsed result. The finish of the task run applies it.
     task?: unknown;
@@ -1605,6 +1608,31 @@ export function judgeAsk(o: RunOutcome, servers: string[], gaps: string[]): Endi
       },
       items: [],
       answer,
+    },
+    [...parsed.cuts, ...down],
+  );
+}
+
+// Write description: a describe run makes no items. The app posts its text only on Update on Bitbucket.
+export function judgeDescribe(o: RunOutcome, servers: string[], gaps: string[]): Ending {
+  const raw = rawOutput(o);
+  if (o.status !== "completed") return { status: o.status, kind: o.kind, text: o.text, raw, outcome: o };
+  const parsed = parseCut(describeResult, o.result?.structured_output);
+  if (!parsed.success) return schemaFailure(parsed.error.issues, "describe", raw, o);
+  const { coverage, ...describe } = parsed.data;
+  const down = unavailable(o, servers, gaps);
+  return ended(
+    raw,
+    o,
+    {
+      summary: {
+        summary: firstLine(describe.title),
+        risks: [],
+        coverage: { ...coverage, skipped: [...parsed.cuts, ...coverage.skipped], unavailable: [...coverage.unavailable, ...down] },
+        dropped: [],
+      },
+      items: [],
+      describe: { ...describe, coverage },
     },
     [...parsed.cuts, ...down],
   );

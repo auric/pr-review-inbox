@@ -179,7 +179,7 @@ const answers = (items: ReviewItemDto[]) =>
 // Refuted and duplicate findings stay in the run record only, so they do not count.
 export function countText(items: ReviewItemDto[], incomplete: boolean, kind: RunKind = "review", checked = false) {
   // An ask run has no items. Its answer shows in the Ask panel. A fix run keeps its edits apart from the items.
-  if (kind === "ask" || kind === "fix") return "";
+  if (kind === "ask" || kind === "fix" || kind === "describe") return "";
   if (kind === "reply") {
     const p = (i: ReviewItemDto) => i.payload as ReplyPayload;
     const r = items.filter((i) => p(i).action !== "none").length;
@@ -263,6 +263,7 @@ export function newCommits(r: RunDto, commits: CommitDto[] | undefined): number 
 // The outcome of an ended run. items, edits: undefined while they load.
 function doneText(r: RunDto, items: ReviewItemDto[] | undefined, edits: number | undefined, profiles: ProfileDto[]): string {
   if (r.kind === "ask") return "Answered";
+  if (r.kind === "describe") return "Wrote a description";
   // judge.ts judgeSession: "N answers".
   if (r.kind === "session") return r.summary?.summary ?? "";
   if (r.kind === "fix") return edits === undefined ? "" : edits ? plural(edits, "edit") : "No edits";
@@ -328,6 +329,13 @@ export const RUN_TEXT: Record<RunKind, { running: string; failed: string; cancel
     cancelled: "the reply drafts",
     doing: "drafting replies for",
     now: "drafting replies",
+  },
+  describe: {
+    running: "Writing the description…",
+    failed: "Write description failed.",
+    cancelled: "the description",
+    doing: "writing the description of",
+    now: "writing a description",
   },
   ask: {
     running: "Answering…",
@@ -429,6 +437,7 @@ export const KIND_LABEL: Record<RunKind, string> = {
   ask: "Ask",
   session: "Session",
   explain: "Explain",
+  describe: "Description",
   discuss: "Ask about a finding",
   interview: "Questions",
   spec: "Plan",

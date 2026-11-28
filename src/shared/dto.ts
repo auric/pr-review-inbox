@@ -8,6 +8,7 @@ import {
   type Anchor,
   type AnchoredFinding,
   type Carried,
+  type DescribeResult,
   type DiffKind,
   type DiscussRecord,
   type DiscussResult,
@@ -19,6 +20,8 @@ import {
   MAX_DISCUSS_MESSAGES,
   MAX_FIX_EDITS,
   MAX_FIX_ITEMS,
+  MAX_PR_DESCRIPTION,
+  MAX_PR_TITLE,
   MAX_QUESTION,
   MAX_REPLY_THREADS,
   NOTE_TEXT_MAX,
@@ -664,7 +667,8 @@ export type Obligations = Record<ObligationOutcome, number> & {
 // session: a direct consult of the user's own session (docs/plans/session-consult.md part C).
 // explain: an Explain this PR run. discuss: one turn of a talk about a finding (docs/plans/review-v2/spec.md sections 2 and 3).
 // interview, spec, implement: the runs of a task (spec.md section 6.2). They have pr NULL, so no PR route gives them.
-export type RunKind = "review" | "reply" | "ask" | "fix" | "session" | "explain" | "discuss" | TaskRunKind;
+// describe: Write description, a proposed title and description for an own pull request.
+export type RunKind = "review" | "reply" | "ask" | "fix" | "session" | "explain" | "discuss" | "describe" | TaskRunKind;
 
 export type RunDto = {
   id: number;
@@ -980,6 +984,23 @@ export type AskDto = { run: RunDto; answer: string | null; parent: number | null
 // The 409 of an ask whose parent already has a follow-up. run: that follow-up.
 export const MOVED_ON = "This conversation moved on in another tab. The newest turn is shown now.";
 export type MovedConflict = ApiError & { moved: { run: number } };
+
+// ---------- Write description ----------
+
+// GET /api/prs/:id/describe: the newest describe run. result: null until the run ends with a valid result, and after Discard or
+// Update on Bitbucket. version: the PR version of the last sync, for the update. null: the PR was never synced.
+// POST /api/prs/:id/describe takes reviewRunInput and gives RunDto: 202 for a new run, 200 for the running run. Own PRs only.
+export type DescribeDto = { run: RunDto; result: DescribeResult | null; version: number | null };
+// POST /api/prs/:id/description: the explicit user action that writes the PR title and description to Bitbucket. version: the PR
+// version on screen. A stale version gives 409 with the current text, which the server stores first. run: the describe run to close.
+export const describeUpdateInput = z.object({
+  version,
+  title: z.string().trim().min(1).max(MAX_PR_TITLE),
+  description: z.string().max(MAX_PR_DESCRIPTION),
+  run: positiveInt.optional(),
+});
+export type DescribeUpdateInput = z.infer<typeof describeUpdateInput>;
+export type DescriptionConflict = ApiError & { title: string; description: string; version: number };
 
 // ---------- Review v2: Explain and Discuss (docs/plans/review-v2/spec.md sections 2.3 and 3.2) ----------
 

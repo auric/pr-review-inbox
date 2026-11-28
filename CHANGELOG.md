@@ -18,6 +18,7 @@
 - Inbox: the row of a reviewed pull request with new commits since the review shows a chip such as "3 new commits". The chip opens the pull request with the review brief for those commits.
 - Build a Jira task: when a build run ends with open tasks, the app now continues it by itself up to two times. "Needs you" with Continue shows only at the third stop, or at once when the part used its cost limit. The Log notes "Continued by the app (1 of 2)." A failed, stopped, or cut run never continues by itself.
 - Build a Jira task: a failed push now shows one plain sentence with a next step. The git output is in the Log only. A branch on the server that blocks the new branch name is named, for example "The server has the branch feature".
+- PR view: the new "Write description" button on your own open pull request asks Claude for a title and a description. Claude uses the diff, the commits, and the linked task. You edit the text, and "Update on Bitbucket" posts it.
 - Build a Jira task: the questions screen has "Copy as Markdown" and "Save .md". They give you the open questions with their options, so you can answer them in your own Claude Code session first.
 - My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."
 - Inbox: the "1 updated · re-sort" chip no longer stays for a pull request that you opened from a link outside the view. Before, a click on the chip did not clear it.

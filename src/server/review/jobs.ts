@@ -14,6 +14,8 @@ import {
   alwaysSkillError,
   type BriefDto,
   type BriefInput,
+  type DescribeDto,
+  type DescribeUpdateInput,
   DISCUSS_FULL,
   type DiscussTurnDto,
   type ExplainDto,
@@ -38,6 +40,8 @@ import {
   type AnchoredFinding,
   askJsonSchema,
   type Carried,
+  describeJsonSchema,
+  describeResult,
   discussJsonSchema,
   explainJsonSchema,
   explainResult,
@@ -61,6 +65,8 @@ import { CHECK_EVENT, passEvent, type RunErrorKind, type RunEvent, SALVAGE_EVENT
 import { implementJsonSchema, runLimitsOf, type TaskRunKind } from "../../shared/task";
 import { byThread, newestLive, type TurnMsg, threadTurn } from "../../shared/turn";
 import type { PrRef } from "../../shared/types";
+import { ForgeError } from "../bitbucket/client";
+import { writeProblem } from "../bitbucket/errors";
 import { dataDir as defaultDataDir } from "../config";
 import { FAILED } from "../context/routes";
 import type { ContextSource } from "../context/source";
@@ -81,6 +87,7 @@ import {
   DEFAULT_PROFILE,
   DOCS_RULE,
   delegation,
+  describeAgent,
   discussAgent,
   explainAgent,
   explorerAgent,
@@ -171,6 +178,7 @@ import {
   type Gitlinks,
   judge,
   judgeAsk,
+  judgeDescribe,
   judgeDiscuss,
   judgeExplain,
   judgeFix,
@@ -194,6 +202,7 @@ import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestions
 import { loadPrContext } from "./pr-context";
 import {
   buildAskPrompt,
+  buildDescribePrompt,
   buildDiscussPrompt,
   buildExplainPrompt,
   buildFixPrompt,
@@ -322,6 +331,10 @@ export type ReviewJobsOptions = {
 };
 
 export type Runner = ReturnType<typeof createClaudeRunner>;
+
+export const DESCRIBE_OWN_ONLY = "Write description works only on your own pull requests.";
+export const DESCRIBE_OPEN_ONLY = "Write description works only on open pull requests.";
+const DESCRIPTION_STALE = "Someone changed this pull request in Bitbucket after the app read it.";
 
 // threads: the threads of a reply or fix run, else null. findings: the review item IDs of a fix run.
 // question: the question of an ask run, else null. profile: the profile as it was at the start.
@@ -699,7 +712,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return proposeNotes(list, proposalContext(j.db, pr, settings.config()?.userSlug ?? null, j.peers ?? new Map()), now());
   }
 
-  // The SQL.end parameters that a PR run and a task run share. The callers add summary, fix, and explain.
+  // The SQL.end parameters that a PR run and a task run share. The callers add summary, fix, explain, and describe.
   function endParams(id: number, e: Ending, usage: RunUsage | null, flagged: string | null) {
     const o = e.outcome;
     return {
@@ -743,6 +756,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         summary: summary ? JSON.stringify(coverage ? { ...summary, coverage } : summary) : null,
         fix: e.result?.fix ? JSON.stringify(e.result.fix.threads) : null,
         explain: e.result?.explain ? JSON.stringify(e.result.explain) : null,
+        describe: e.result?.describe ? JSON.stringify(e.result.describe) : null,
       });
       // Restart recovery can end the row first. Then no item goes in.
       if (!done.changes) return false;
@@ -1061,7 +1075,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // A re-review gets findings.md instead. An explain run gets no history (docs/plans/review-v2/spec.md section 3.2). A discuss run gets
     // finding.md and discussion.md instead (spec.md section 2.4).
     const history =
-      j.kind === "explain" || j.kind === "discuss"
+      j.kind === "explain" || j.kind === "discuss" || j.kind === "describe"
         ? null
         : j.kind !== "review"
           ? historyFile(j.db, j.pr, pr.source_head)
@@ -1215,6 +1229,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     const fix = j.kind === "fix" ? j.threads : null;
     const question = j.question;
     const explain = j.kind === "explain";
+    const describe = j.kind === "describe";
     // docs/plans/review-v2/spec.md section 2.16: a follow-up gets the earlier turns of its conversation in stdin.
     const conversation = question !== null ? askConversation(j.db, j.id, pr.source_head, history?.asks ?? new Set()) : null;
     const spec = reply
@@ -1245,17 +1260,19 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
               }
             : explain
               ? { prompt: buildExplainPrompt(input), schema: explainJsonSchema(), main: explainAgent(profile) }
-              : d
-                ? {
-                    prompt: buildDiscussPrompt({ ...input, message: d.message }),
-                    schema: discussJsonSchema(),
-                    main: discussAgent(profile, context),
-                  }
-                : {
-                    prompt: buildPrompt(input),
-                    schema: reviewJsonSchema(profile.explain),
-                    main: mainAgent(profile, context),
-                  };
+              : describe
+                ? { prompt: buildDescribePrompt(input), schema: describeJsonSchema(), main: describeAgent(profile, context) }
+                : d
+                  ? {
+                      prompt: buildDiscussPrompt({ ...input, message: d.message }),
+                      schema: discussJsonSchema(),
+                      main: discussAgent(profile, context),
+                    }
+                  : {
+                      prompt: buildPrompt(input),
+                      schema: reviewJsonSchema(profile.explain),
+                      main: mainAgent(profile, context),
+                    };
     // docs/plans/review-v2/spec.md section 1.9: a review run shows phase finding, then checking.
     const finder = j.kind === "review" && !profile.explain;
     // docs/plans/review-v2/thorough-review.md D1: arm 2 gets its snapshot and servers before either finder starts. An index sets the
@@ -1569,6 +1586,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (fix) return noted(await judgeFix(o, ws, fix, j.findings, servers, gaps));
     if (question !== null) return noted(judgeAsk(o, servers, gaps));
     if (explain) return noted(await judgeExplain(o, ws, servers, gaps));
+    if (describe) return noted(judgeDescribe(o, servers, gaps));
     const rereview = carry && { carry, items: [...current(j.db, earlier), ...carry.posted].map(earlierItem) };
     // docs/plans/review-v2/spec.md section 1.6, salvage. A cancel returned above. A time limit gives kind process.
     const line = `The review reached its turn cap (${profile.maxTurns}). These findings come from its notes so far.`;
@@ -2324,6 +2342,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         summary: summary ? JSON.stringify(summary) : null,
         fix: null,
         explain: null,
+        describe: null,
       });
       // Restart recovery can end the row first. Then the task stays as recoverTasks left it.
       if (!done.changes) return undefined;
@@ -2681,6 +2700,33 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return launch(db, { ...pr, source_head, target_head }, { ...brief, note: "" }, profile, key, "explain");
   }
 
+  // Write description: own PRs only. Each start makes a new run, because the PR text and the task text are inputs that the key does
+  // not hold. A second start while the run of the same heads and profile runs returns that run.
+  function startDescribe(db: Database, id: number, profileId?: string): StartResult {
+    const pr = prRow(db, id);
+    if (!pr) return { status: 404, error: "Pull request not found." };
+    if (pr.my_role !== "AUTHOR") return { status: 409, error: DESCRIBE_OWN_ONLY };
+    if (pr.state !== "OPEN") return { status: 409, error: DESCRIBE_OPEN_ONLY };
+    const { source_head, target_head } = pr;
+    if (!source_head || !target_head) return { status: 409, error: "Sync the pull request first." };
+    const brief = briefOf(db, id);
+    const profile = profileOf(settings.profiles(), profileId ?? brief.profile);
+    const key = [id, "describe", source_head, target_head, profile.id, profileRevision(profile)].join(":");
+    return launch(db, { ...pr, source_head, target_head }, { ...brief, note: "" }, profile, key, "describe");
+  }
+
+  // The open proposal of a describe run. null: no result, a closed proposal, or a row that no longer parses.
+  function describeOf(db: Database, r: RunRow) {
+    const row = db.query(SQL.describeJson).get({ id: r.id }) as { describe_json: string | null } | null;
+    if (!row?.describe_json || (r.status !== "completed" && r.status !== "incomplete")) return null;
+    try {
+      const parsed = describeResult.safeParse(JSON.parse(row.describe_json));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
   // The stored result of an explain run. null: no result, or a row that no longer parses.
   function explainOf(db: Database, r: RunRow) {
     const row = db.query(SQL.explainJson).get({ id: r.id }) as { explain_json: string | null } | null;
@@ -2843,6 +2889,65 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     },
 
     explain: startExplain,
+    describe: startDescribe,
+
+    // GET /api/prs/:id/describe. null: no such PR. describe null: the PR has no describe run. Reading starts no run.
+    description(db: Database, id: number): { describe: DescribeDto | null } | null {
+      const pr = prRow(db, id);
+      if (!pr) return null;
+      const newest = db.query(`${SQL.run} ${SQL.describeNewest}`).get({ pr: id }) as RunRow | null;
+      if (!newest) return { describe: null };
+      const run = withPhase(db, toRunDto(newest, effortsNow()));
+      return { describe: { run, result: describeOf(db, newest), version: pr.pr_version } };
+    },
+
+    // Discard: the proposal closes. Nothing goes to Bitbucket. false: no describe run with this ID on this PR.
+    discardDescription(db: Database, id: number, run: number): boolean {
+      return db.query(SQL.describeClose).run({ id: run, pr: id }).changes > 0;
+    },
+
+    // POST /api/prs/:id/description: the user's click on Update on Bitbucket. One PUT with the version on screen, never repeated.
+    // A stale version (HTTP 409) reads the PR again and stores its text, so the next try starts from the current version.
+    async updateDescription(
+      db: Database,
+      id: number,
+      input: DescribeUpdateInput,
+    ): Promise<
+      | { status: 200; version: number }
+      | { status: 404 | 502; error: string }
+      | { status: 409; error: string; current?: { title: string; description: string; version: number } }
+    > {
+      const pr = prRow(db, id);
+      if (!pr) return { status: 404, error: "Pull request not found." };
+      if (pr.my_role !== "AUTHOR") return { status: 409, error: DESCRIBE_OWN_ONLY };
+      if (pr.state !== "OPEN") return { status: 409, error: DESCRIBE_OPEN_ONLY };
+      const provider = await settings.provider().catch(() => null);
+      if (!provider) return { status: 409, error: "Configure the Bitbucket URL and token first." };
+      const ref = { project: pr.project, repo: pr.repo, id: pr.pr_id };
+      const store = (p: { title: string; description?: string; version: number }) =>
+        db.query(SQL.prText).run({ id, title: p.title, description: p.description ?? null, version: p.version });
+      try {
+        const done = await provider.updatePullRequest(ref, { version: input.version, title: input.title, description: input.description });
+        db.transaction(() => {
+          store(done);
+          if (input.run !== undefined) db.query(SQL.describeClose).run({ id: input.run, pr: id });
+        })();
+        return { status: 200, version: done.version };
+      } catch (e) {
+        if (!(e instanceof ForgeError && e.status === 409)) return { status: 502, error: writeProblem(e, "update", ref).sentence };
+        const now = await provider.getPullRequest(ref).catch(() => null);
+        if (!now) return { status: 409, error: `${DESCRIPTION_STALE} Sync the inbox, then try again.` };
+        // A 409 with an unchanged version has another cause, such as a closed PR.
+        if (now.version === input.version)
+          return { status: 502, error: `Bitbucket refused the change (HTTP 409). Check pull request #${ref.id} in Bitbucket.` };
+        store(now);
+        return {
+          status: 409,
+          error: `${DESCRIPTION_STALE} The app loaded the current text. Check it, then update again.`,
+          current: { title: now.title, description: now.description ?? "", version: now.version },
+        };
+      }
+    },
 
     // GET /api/prs/:id/explain (spec.md section 3.2). null: no such PR. explain null: the PR has no explain run. Reading starts no run.
     explanation(db: Database, id: number): { explain: ExplainDto | null } | null {

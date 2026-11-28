@@ -5,6 +5,7 @@
 // explain, discuss, reply drafts, fix runs, cancel, run, raw output, item triage, review quality stats, and Improve prompt. Every
 // mutation of PR data broadcasts `changed`.
 // Improve prompt: a new start replaces the running proposal. Nothing saves until the user applies the proposal.
+// Write description: the start and Discard post nothing. Only POST /prs/:id/description writes to Bitbucket.
 import { Hono } from "hono";
 import { validator } from "hono/validator";
 import { z } from "zod";
@@ -12,6 +13,8 @@ import {
   type ApiError,
   askInput,
   briefInput,
+  type DescriptionConflict,
+  describeUpdateInput,
   discussInput,
   fixRunInput,
   type ItemConflict,
@@ -147,6 +150,64 @@ export function createReviewRoutes(opts: { review: ReviewJobs; live: Live }) {
       const r = db && review.explanation(db, c.req.valid("param").id);
       return r ? c.json(r.explain, 200) : c.json(notFound("Pull request"), 404);
     })
+    .post(
+      "/prs/:id/describe",
+      prParam,
+      validator("query", (v, c) => {
+        const r = reviewRunInput.safeParse(v);
+        return r.success ? r.data : c.json<ApiError>({ error: UNKNOWN_PROFILE }, 400);
+      }),
+      (c) => {
+        const db = review.open();
+        if (!db) return c.json(unconfigured, 409);
+        const { profile } = c.req.valid("query");
+        if (profile && !review.hasProfile(profile)) return c.json<ApiError>({ error: UNKNOWN_PROFILE }, 400);
+        const r = review.describe(db, c.req.valid("param").id, profile);
+        if ("run" in r) return r.status === 202 ? c.json(r.run, 202) : c.json(r.run, 200);
+        if ("conflict" in r) return c.json(r.conflict, 409);
+        return r.status === 404 ? c.json({ error: r.error }, 404) : c.json({ error: r.error }, 409);
+      },
+    )
+    .get("/prs/:id/describe", prParam, (c) => {
+      const db = review.open();
+      const r = db && review.description(db, c.req.valid("param").id);
+      return r ? c.json(r.describe, 200) : c.json(notFound("Pull request"), 404);
+    })
+    .post(
+      "/prs/:id/describe/discard",
+      prParam,
+      validator("json", (v, c) => {
+        const r = z.object({ run: z.number().int().positive() }).safeParse(v);
+        return r.success ? r.data : c.json<ApiError>({ error: "Invalid run ID." }, 400);
+      }),
+      (c) => {
+        const db = review.open();
+        if (!db) return c.json(unconfigured, 409);
+        const id = c.req.valid("param").id;
+        if (!review.discardDescription(db, id, c.req.valid("json").run)) return c.json(notFound("Description run"), 404);
+        live.broadcast("changed", { prs: [id] });
+        return c.json({ ok: true }, 200);
+      },
+    )
+    .post(
+      "/prs/:id/description",
+      prParam,
+      validator("json", (v, c) => {
+        const r = describeUpdateInput.safeParse(v);
+        return r.success ? r.data : c.json<ApiError>({ error: "Invalid title or description." }, 400);
+      }),
+      async (c) => {
+        const db = review.open();
+        if (!db) return c.json(unconfigured, 409);
+        const id = c.req.valid("param").id;
+        const r = await review.updateDescription(db, id, c.req.valid("json"));
+        if (r.status !== 404) live.broadcast("changed", { prs: [id] });
+        if (r.status === 200) return c.json({ version: r.version }, 200);
+        if (r.status === 409)
+          return c.json<DescriptionConflict | ApiError>(r.current ? { error: r.error, ...r.current } : { error: r.error }, 409);
+        return r.status === 404 ? c.json({ error: r.error }, 404) : c.json({ error: r.error }, 502);
+      },
+    )
     .get("/prs/:id/asks", prParam, (c) => {
       const db = review.open();
       if (!db) return c.json([], 200);

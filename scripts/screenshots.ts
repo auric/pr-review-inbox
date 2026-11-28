@@ -219,6 +219,13 @@ async function shots(browser: Browser) {
   await toTop(page.locator("#t-2000"), 64);
   await save(page, "fix-thread");
 
+  // Write description on my own PR: the proposal form under the description.
+  await page.getByRole("button", { name: "Write description" }).click();
+  await page.getByRole("form", { name: "Proposed description" }).waitFor({ timeout: RUN_MS });
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await toTop(page.locator("#s-overview"), 16);
+  await save(page, "describe");
+
   // Thread history: the resolved thread 3000 of my other PR, with its draft, my edit, the fix commit, the revision, the post, and
   // the resolve (scripts/demo.ts). Show changes opens the word diff of my edit.
   await openPr(page, "Replace the polling timer");

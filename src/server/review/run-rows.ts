@@ -182,7 +182,7 @@ export const SQL = {
   related: "UPDATE review_run SET related_json = $json WHERE id = $id",
   end: `UPDATE review_run SET status = $status, error_kind = $kind, error_text = $text, session_id = $session, cli_version = $cli, model = COALESCE($model, model),
       effort_default = CASE WHEN $init_effort THEN $effort_default ELSE effort_default END, usage_json = $usage, summary_json = $summary, answer = $answer, fix_json = $fix,
-      explain_json = $explain, raw_output = $raw, finished_at = $now
+      explain_json = $explain, describe_json = $describe, raw_output = $raw, finished_at = $now
     WHERE id = $id AND status = 'running'`,
   fixEdit: `INSERT INTO fix_edit (run, ord, thread, item, path, old, new, start, rows_json)
     VALUES ($run, $ord, $thread, $item, $path, $old, $new, $start, $rows)`,
@@ -237,6 +237,11 @@ export const SQL = {
   explainDone: `WHERE r.pr = $pr AND r.kind = 'explain' AND r.status IN ('completed', 'incomplete') AND r.explain_json IS NOT NULL
     AND ($key IS NULL OR r.idem_key = $key) ORDER BY r.id DESC LIMIT 1`,
   explainJson: "SELECT explain_json FROM review_run WHERE id = $id",
+  // Write description: the newest describe run, its result, and the end of its proposal.
+  describeNewest: "WHERE r.pr = $pr AND r.kind = 'describe' ORDER BY r.id DESC LIMIT 1",
+  describeJson: "SELECT describe_json FROM review_run WHERE id = $id",
+  describeClose: "UPDATE review_run SET describe_json = NULL WHERE id = $id AND pr = $pr AND kind = 'describe'",
+  prText: "UPDATE pull_request SET title = $title, description = $description, pr_version = $version WHERE id = $id",
   historyAsks:
     "WHERE r.pr = $pr AND r.kind = 'ask' AND r.status IN ('completed', 'incomplete') AND r.answer IS NOT NULL ORDER BY r.id DESC",
   historyItems: `SELECT * FROM review_item i WHERE run = $run AND kind = 'finding' AND ${NOT_REVISION} ORDER BY id`,

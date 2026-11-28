@@ -514,6 +514,20 @@ const reviewed = [A, B, C].map(({ pr, path }) => {
   reviewWrites(fake, path, pr as unknown as Reviewed);
   return { pr, reviewers: S.clone(pr.reviewers) };
 });
+// Write description: the PUT of PR 1004 as Gate G4 recorded it, version + 1, or 409 on a stale version. A reset puts the text back.
+type PrText = { title: string; description?: string; version: number };
+const dText = D.pr as unknown as PrText;
+const D_TEXT = { title: dText.title, description: dText.description, version: dText.version };
+r[key("PUT", D.path)] = async (req) => {
+  const body = (await req.json()) as Partial<PrText>;
+  if (body.version !== dText.version) return { status: 409, body: { errors: [{ message: "The pull request version is out of date." }] } };
+  Object.assign(dText, {
+    title: body.title ?? dText.title,
+    description: body.description ?? dText.description,
+    version: dText.version + 1,
+  });
+  return ok(D.pr);
+};
 r[key("GET", `${D.path}/activities`)] = () => ok(S.onePage(postsD.activities()));
 // The commits and changes of PR 77 only exist in the forge scenario. Other PRs get 404, so their detail has no Files or Commits.
 const forgeOnly = (name: string) => (): Reply => (sc.forge ? fixture(name) : NOT_FOUND);
@@ -780,6 +794,7 @@ r[key("POST", "/__control/reset")] = async () => {
   await headA();
   for (const p of [postsA, postsB, postsC, postsD]) p.reset();
   for (const x of reviewed) x.pr.reviewers = S.clone(x.reviewers);
+  Object.assign(dText, D_TEXT);
   taskPosts = null;
   // The task PRs and the task branches of the last test go. The other branches and the PR refs stay.
   taskRepo.prs.clear();

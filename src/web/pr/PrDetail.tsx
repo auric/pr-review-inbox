@@ -729,7 +729,7 @@ export function PrDetail({
           {data ? (
             <>
               {review.reviewed && review.run}
-              <Description detail={data} me={me} />
+              <Description detail={data} me={me} describe={meta && { runner: meta.runner.short, forge: meta.forge.name, announce }} />
               <Notes pr={row.id} own={pr} threads={threads} jump={jump} announce={announce} focusAfter={focusAfter} />
               {!review.reviewed && review.run}
               {review.drafts}

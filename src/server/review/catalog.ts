@@ -1197,6 +1197,40 @@ export function askAgent(p: Profile, c: RunFiles = {}, followUp = false): AgentS
   };
 }
 
+// Write description: a describe run gets no subagents, so the caller passes agents {} and the CLI gets no Agent tool.
+// tests/review/describe.test.ts checks the key lines.
+export const DESCRIBE_RULES = [
+  "You write the title and the description of one pull request for its author. You cannot change files, and you post nothing.",
+  "The author reads your text and edits it. Then the author posts it with one click, so reviewers see what you wrote.",
+  "Read ./context/pr.md first. It holds the current title and description that the author wrote.",
+  "Read ./context/task.md when it exists. The task text tells why the change exists.",
+  "Read the commit messages with git_log and the change with git_diff. They tell what changed.",
+  "Base each statement on the diff, the commit messages, or the task text. Reviewers trust the description, so do not invent facts.",
+  "Keep each part of the current description that is still true. The author wrote it, and it can hold facts that the code does not show.",
+  "Change or remove a statement of the author only when the change shows that it is wrong.",
+  "Write the title as one short line. Keep the task key at the start when the current title has one.",
+  "Write the description as Markdown with three sections: ## What changed and why, ## How to test, and ## Risks.",
+  "In How to test, name the tests that the change adds or changes. Give the steps that a reviewer can follow.",
+  "Say so when the change has no tests.",
+  'In Risks, name what the change can break and where. Write "None found." when you found no risk.',
+  "When you cannot confirm a fact, leave it out or mark it as not confirmed.",
+  "Write in the language of the current description. Use short, plain sentences.",
+  "You are done when the title and the description are ready for the author to read.",
+];
+
+export function describeAgent(p: Profile, c: RunFiles = {}): AgentSpec {
+  return {
+    description: "Read-only title and description for one pull request.",
+    prompt: [
+      ...DESCRIBE_RULES,
+      ...prContextRules(c),
+      ...TRUST,
+      "In coverage, list what you read, what you skipped, and what was not available.",
+      ...docsRule(p),
+    ].join("\n"),
+  };
+}
+
 // ---------- Task runs (docs/plans/review-v2/spec.md section 6.6) ----------
 // The lines follow the spec tables. Lines of more than 20 words are split into shorter sentences (ASD-STE100).
 

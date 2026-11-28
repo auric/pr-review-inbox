@@ -14,7 +14,7 @@ process.env.REVIEW_LOOP_DATA_DIR = dir;
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The user_version after the last migration of db.ts.
-const LATEST = 56;
+const LATEST = 57;
 
 // One transaction per setup: a commit per statement is slow on Windows CI disks.
 const migrate = (db: Database, files: string[]) =>
@@ -110,7 +110,7 @@ const R3_COLUMNS = {
   skills_json: null,
   consult_json: null,
 };
-// 030_review_v2.sql, 032_ask_parent.sql, 033_task.sql, 058_run_related.sql, and 059_run_log_cleared.sql.
+// 030_review_v2.sql, 032_ask_parent.sql, 033_task.sql, 058_run_related.sql, 059_run_describe.sql, and 060_run_log_cleared.sql.
 const V2_COLUMNS = {
   prompt_version: null,
   item: null,
@@ -119,6 +119,7 @@ const V2_COLUMNS = {
   parent_run: null,
   task: null,
   related_json: null,
+  describe_json: null,
   log_cleared_at: null,
 };
 const V2_NAMES = Object.keys(V2_COLUMNS);
@@ -829,6 +830,7 @@ const withParent = (d: object) =>
     parent_run: null,
     task: null,
     related_json: null,
+    describe_json: null,
     log_cleared_at: null,
   }));
 
@@ -954,7 +956,7 @@ test("migration from a version-31 database keeps every row and adds parent_run w
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     const after = { ...dump(db), notes: db.query("SELECT * FROM pr_note").all(), fix: db.query("SELECT * FROM fix_edit").all() };
     expect(after as Record<string, unknown>).toEqual({ ...before, review_run: withParent(before) });
-    expect(columns(db, "review_run").slice(-4)).toEqual(["parent_run", "task", "related_json", "log_cleared_at"]);
+    expect(columns(db, "review_run").slice(-5)).toEqual(["parent_run", "task", "related_json", "describe_json", "log_cleared_at"]);
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'review_run_parent'").all()).toEqual([{ name: "review_run_parent" }]);
 
     const ask = (id: number, parent: number | null) =>
@@ -1018,13 +1020,14 @@ test("migration from a version-32 database keeps every row and child row; task r
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
     expect((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(columns(db, "review_run")).toEqual([...oldColumns, "task", "related_json", "log_cleared_at"]);
+    expect(columns(db, "review_run")).toEqual([...oldColumns, "task", "related_json", "describe_json", "log_cleared_at"]);
     expect({ ...dump(db), ...extra(db) } as Record<string, unknown>).toEqual({
       ...before,
       review_run: (before.review_run as Record<string, unknown>[]).map((r) => ({
         ...r,
         task: null,
         related_json: null,
+        describe_json: null,
         log_cleared_at: null,
       })),
     });
@@ -2018,7 +2021,48 @@ test("migration from a version-54 database keeps the run rows and adds related_j
   const db = openDb(path);
   try {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
-    expect(db.query("SELECT * FROM review_run").all()).toEqual(before.map((r) => ({ ...r, related_json: null, log_cleared_at: null })));
+    expect(db.query("SELECT * FROM review_run").all()).toEqual(
+      before.map((r) => ({ ...r, related_json: null, describe_json: null, log_cleared_at: null })),
+    );
+  } finally {
+    db.close();
+  }
+});
+
+// ---------- Write description (059_run_describe.sql) ----------
+
+// The rebuild keeps every run row with its ID and its child rows, adds describe_json as NULL, and takes kind describe.
+test("migration from a version-55 database keeps the run rows and child rows, adds describe_json as NULL, and takes kind describe", () => {
+  const path = join(dir, "v55.sqlite");
+  const old = new Database(path, { create: true, strict: true });
+  const files = readdirSync(join(import.meta.dir, "../../src/server/storage/migrations")).filter((f) => f >= "031" && f < "059");
+  migrate(old, [...V30, ...files.sort()]);
+  old.exec("PRAGMA user_version = 55");
+  old.exec(`INSERT INTO pull_request (id, project, repo, pr_id) VALUES (1, 'P', 'r', 2);
+    INSERT INTO review_run (id, pr, kind, profile, profile_name, explain, note, idem_key, source_head, target_head, merge_base, status, started_at,
+      related_json)
+    VALUES (7, 1, 'ask', 'general', 'General', 0, '', 'k', 'h', 't', 'm', 'completed', 1, '[]');
+    INSERT INTO run_event (run, id, seq, tool, target, status, started_at) VALUES (7, 'e1', 1, 'Read', 'a.ts', 'done', 1);`);
+  const before = old.query("SELECT * FROM review_run").all() as object[];
+  const events = old.query("SELECT * FROM run_event").all();
+  old.close();
+
+  const db = openDb(path);
+  try {
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LATEST);
+    expect(db.query("SELECT * FROM review_run").all()).toEqual(before.map((r) => ({ ...r, describe_json: null, log_cleared_at: null })));
+    expect(db.query("SELECT * FROM run_event").all()).toEqual(events);
+    // 060_run_log_cleared.sql runs after the rebuild, so the rebuild cannot drop log_cleared_at.
+    expect(columns(db, "review_run").slice(-2)).toEqual(["describe_json", "log_cleared_at"]);
+    db.exec(`INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, status, started_at)
+      VALUES (1, 'describe', 'general', '', 'd', 'h', 't', 'running', 2)`);
+    expect(() =>
+      db.exec(`INSERT INTO review_run (pr, kind, profile, note, idem_key, source_head, target_head, status, started_at)
+        VALUES (1, 'other', 'general', '', 'o', 'h', 't', 'running', 2)`),
+    ).toThrow();
+    expect(db.query("SELECT name FROM sqlite_master WHERE tbl_name = 'review_run' AND type = 'index' ORDER BY name").all()).toEqual(
+      ["review_run_item", "review_run_parent", "review_run_pr", "review_run_running", "review_run_task"].map((name) => ({ name })),
+    );
   } finally {
     db.close();
   }

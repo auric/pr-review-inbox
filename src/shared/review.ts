@@ -715,6 +715,22 @@ export type AskResult = z.infer<typeof askResult>;
 
 export const askJsonSchema = (): Record<string, unknown> => aiJsonSchema(askResult);
 
+// ---------- Write description ----------
+
+// App caps. Bitbucket applies its own limits on the update and names a refusal.
+export const MAX_PR_TITLE = 255;
+export const MAX_PR_DESCRIPTION = 30_000;
+
+export const describeResult = z.object({
+  title: z.string().trim().min(1).max(MAX_PR_TITLE).describe("The pull request title. One line."),
+  description: z.string().max(MAX_PR_DESCRIPTION).describe("The pull request description as Markdown."),
+  coverage,
+});
+
+export type DescribeResult = z.infer<typeof describeResult>;
+
+export const describeJsonSchema = (): Record<string, unknown> => aiJsonSchema(describeResult);
+
 // ---------- Improve prompt ----------
 
 // The server extends prompt with the profile prompt rule of dto.ts. dto.ts imports this module, so this module cannot import it.
