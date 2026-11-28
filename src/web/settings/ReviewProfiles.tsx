@@ -838,7 +838,7 @@ function ProfileRow(rowProps: RowProps) {
         <Toggle
           id={profileId(i, "history")}
           label={<>Git history{of}</>}
-          help="The review reads why the changed lines were written, from the git history. Works best with a Jira MCP server in this profile."
+          help={`The review reads why the changed lines were written, from the git history. Works best with a ${tracker} MCP server in this profile.`}
           checked={d.variants.includes("git-history")}
           onChange={(on) => edit({ variants: withVariant(d.variants, "git-history", on) })}
         />

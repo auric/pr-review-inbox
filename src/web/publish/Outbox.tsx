@@ -12,6 +12,7 @@ import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import type { CommentDto, PostDto, ReviewItemDto } from "../../shared/dto";
 import { commentUrl } from "../../shared/links";
+import { useMeta } from "../meta";
 import { restoreDraft } from "../pr/ReplyComposer";
 import { ForgeLink, Text } from "../pr/Thread";
 import { replyKey, sendItem } from "../review/data";
@@ -32,6 +33,7 @@ export type PostCtx = {
 // The rows of one PR, split by place. Rows of earlier visits stay until their synced comment arrives.
 export function useOutbox(pr: number, comments: CommentDto[], forge: string) {
   const qc = useQueryClient();
+  const runner = useMeta().data?.runner.short ?? "";
   const posts = usePosts(pr);
   const data = posts.data;
   // A post changes item states, but the outbox names only the PR in SSE. Each new state reloads the run items.
@@ -54,10 +56,10 @@ export function useOutbox(pr: number, comments: CommentDto[], forge: string) {
           void qc.invalidateQueries({ queryKey: replyKey(pr) });
           void qc.invalidateQueries({ queryKey: planKey(pr) });
           void qc.invalidateQueries({ queryKey: ["run"] });
-          if (!r || "conflict" in r) toast.add({ title: "Claude's draft reply stays. It changed, or the discard failed." });
+          if (!r || "conflict" in r) toast.add({ title: `${runner}'s draft reply stays. It changed, or the discard failed.` });
         });
     }
-  }, [data, qc, pr]);
+  }, [data, qc, pr, runner]);
 
   const roots = useRef(comments);
   roots.current = comments;

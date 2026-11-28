@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toast";
 import { MAX_NOTE, type PostDto, type ReviewItemDto } from "../../shared/dto";
+import { useMeta } from "../meta";
 import { Confirm } from "../publish/Confirm";
 import { postReply, postsKey, replyDiscards } from "../publish/data";
 import { draftKey, editDraft, mergePosts, parseDraft, placeOf, type ReplyDraft, replyText } from "../publish/model";
@@ -53,7 +54,7 @@ const nameOf = (m: Node) => (m.who.me ? "your message" : m.who.name);
 type Pending = { parent: Node; seen: number; text: string; draft: ReviewItemDto | null; drop: boolean };
 
 // The reply confirm choice for the AI reply draft that the post puts out of date.
-export function DropDraftBox(p: { checked: boolean; disabled: boolean; onChange: (on: boolean) => void }) {
+export function DropDraftBox(p: { runner: string; checked: boolean; disabled: boolean; onChange: (on: boolean) => void }) {
   return (
     <label data-drop-draft className="flex items-center gap-2 text-sm">
       <input
@@ -63,7 +64,7 @@ export function DropDraftBox(p: { checked: boolean; disabled: boolean; onChange:
         disabled={p.disabled}
         onChange={(e) => p.onChange(e.target.checked)}
       />
-      Also discard Claude's draft reply in this thread
+      {`Also discard ${p.runner}'s draft reply in this thread`}
     </label>
   );
 }
@@ -81,6 +82,7 @@ export function ReplyComposer({
   aside?: ReactNode;
 }) {
   const qc = useQueryClient();
+  const runner = useMeta().data?.runner.short ?? "";
   const k = draftKey(ctx.pr, t.id);
   const [d, setD] = useState<ReplyDraft>(() => readDraft(k) ?? fresh());
   const [open, setOpen] = useState(() => d.text !== "");
@@ -312,7 +314,12 @@ export function ReplyComposer({
           onCancel={closeConfirm}
           extra={
             confirm.draft && (
-              <DropDraftBox checked={confirm.drop} disabled={posting} onChange={(drop) => setConfirm((c) => c && { ...c, drop })} />
+              <DropDraftBox
+                runner={runner}
+                checked={confirm.drop}
+                disabled={posting}
+                onChange={(drop) => setConfirm((c) => c && { ...c, drop })}
+              />
             )
           }
           className="mt-2.5 rounded-lg border border-rule-strong bg-pane px-3.5 pt-3 pb-3"

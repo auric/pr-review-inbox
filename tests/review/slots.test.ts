@@ -186,7 +186,8 @@ describe("several runs at once (spec.md section 6.26)", () => {
       expect(await waitFor(async () => (await h.status(rb)) === "cancelled")).toBe(true);
       expect([await h.status(ra), await h.status(rc)]).toEqual(["running", "running"]);
 
-      // A save with a token is a connection change.
+      // A save that signs in another user is a connection change. A new token of the same user keeps the runs.
+      h.fake.user = "other.user";
       expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, token: FAKE_TOKEN } })).status).toBe(200);
       await h.review.wait();
       expect([await h.status(ra), await h.status(rc)]).toEqual(["cancelled", "cancelled"]);

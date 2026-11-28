@@ -77,7 +77,7 @@ describe("the reply confirm", () => {
         canPost
         onPost={() => {}}
         onCancel={() => {}}
-        extra={<DropDraftBox checked={checked} disabled={posting} onChange={() => {}} />}
+        extra={<DropDraftBox runner="Claude" checked={checked} disabled={posting} onChange={() => {}} />}
       />,
     );
   test("shows the checked box with its text above Post", () => {

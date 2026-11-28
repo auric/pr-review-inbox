@@ -113,7 +113,7 @@ export function useFollow() {
 
 export type ReviewStatus = z.infer<typeof reviewStatusInput>["status"];
 
-// BRIEF section 9 backlog: Approve, Needs work, and their clear. The server answers after Bitbucket confirms the status.
+// BRIEF section 9 backlog: Approve, Needs work, and their clear. The server answers after the forge confirms the status.
 export function useReviewStatus() {
   const qc = useQueryClient();
   return useMutation({
