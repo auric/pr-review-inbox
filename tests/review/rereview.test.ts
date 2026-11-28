@@ -547,6 +547,8 @@ describe("re-review runs", () => {
       await h.brief("general");
       const base = await h.finish((await h.post<RunDto>(`/api/prs/${h.pr}/review`)).body.id);
       expect(base.run.status).toBe("incomplete");
+      // The fake run reads no changed file, so the full review counts each one.
+      expect(base.run.summary?.unreadFiles).toBeGreaterThan(0);
       expect(await h.reviewed()).toBe(h.s1);
       const at = (line: number) => base.items.find((i) => i.kind === "finding" && i.anchor?.line === line) as ReviewItemDto;
       const question = base.items.find((i) => i.kind === "question") as ReviewItemDto;
@@ -593,6 +595,8 @@ describe("re-review runs", () => {
         since: { head: h.s1, incremental: true },
         findings: 3,
       });
+      // A re-review reads only the new range, so it gets no unread count.
+      expect(d.run.summary?.unreadFiles).toBeUndefined();
       const coverage = d.run.summary?.coverage;
       expect(coverage?.skipped).toEqual([
         "Verdict for finding 99999 dropped: the ID is not an earlier finding.",

@@ -31,7 +31,6 @@ import {
   finderChange,
   type Options,
   parseOptions,
-  partFacts,
   replayRefusal,
   runFacts,
   VERIFY_ONLY,
@@ -199,14 +198,14 @@ describe("eval harness without --real (AC-M2)", () => {
       "effort",
       "reviewer",
     ]);
-    expect(finderChange(base, { ...p.profile, variants: ["callers"] })).toEqual(["variants"]);
+    expect(finderChange(base, { ...p.profile, variants: ["handoff"] })).toEqual(["variants"]);
     // focused-passes.md section 5.4: --candidate-replay refuses lenses3, because it changes the finder. style55 changes the finder too.
     expect(finderChange(base, { ...p.profile, variants: ["lenses3"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["style55"] })).toEqual(["variants"]);
     // The removed verify-only variants stay in VERIFY_ONLY, so an old recording with one of them still replays.
     expect(VERIFY_ONLY).toEqual(["obligations", "refute-issue", "security2-verify", "verify2"]);
     expect(finderChange(base, { ...p.profile, variants: ["refute-issue"] })).toEqual([]);
-    expect(finderChange(base, { ...p.profile, variants: ["refute-issue", "callers"] })).toEqual(["variants"]);
+    expect(finderChange(base, { ...p.profile, variants: ["refute-issue", "handoff"] })).toEqual(["variants"]);
     expect(finderChange(base, { ...p.profile, variants: ["verify2"] })).toEqual([]);
     // obligations.md section 8: the obligation check changes only the verify prompts.
     expect(finderChange(base, { ...p.profile, variants: ["obligations"] })).toEqual([]);
@@ -280,32 +279,6 @@ describe("eval harness without --real (AC-M2)", () => {
     expect(runFacts([])).toEqual({ agentCalls: 0, opened: [], toolsPerCall: 0 });
   });
 
-  test("partFacts counts the part files that an rl-reviewer call of the find phase read (docs/plans/review-v3.md WP-V14)", () => {
-    const cwd = join(TMP, "run");
-    const parser = createStreamParser({ cwd, allowedTools: new Set() });
-    const use = (id: string, name: string, input: Record<string, unknown>) => ({ type: "tool_use", id, name, input });
-    const say = (parent: string | null, ...content: unknown[]) =>
-      parser.line(JSON.stringify({ type: "assistant", parent_tool_use_id: parent, session_id: "s", message: { content } }));
-    const done = (id: string, isError = false) =>
-      parser.line(
-        JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "x", is_error: isError }] } }),
-      );
-    const part = (n: number) => join(cwd, "context", "parts", `part-${n}.md`);
-    say(null, use("a1", "Agent", { subagent_type: "rl-reviewer", description: "Part 1" }));
-    say("a1", use("r1", "Read", { file_path: part(1) }), use("r2", "Read", { file_path: part(3) }));
-    say(null, use("m1", "Read", { file_path: part(2) }));
-    for (const id of ["r1", "a1", "m1"]) done(id);
-    done("r2", true);
-    const [call, read] = parser.events();
-    // A verify-phase event does not count.
-    const check = [
-      { ...(call as RunEvent), id: `${CHECK_EVENT}a9` },
-      { ...(read as RunEvent), id: `${CHECK_EVENT}r9`, parent: `${CHECK_EVENT}a9`, target: "context/parts/part-4.md" },
-    ];
-    expect(partFacts([...parser.events(), ...check], 4)).toEqual({ parts: 4, partsRead: 1 });
-    expect(partFacts([], 0)).toEqual({ parts: 0, partsRead: 0 });
-  });
-
   test("--verifier sets the verify mode of the run profile and keeps its verifier model and effort", () => {
     expect(parseOptions([])).toMatchObject({ verifier: null });
     expect(parseOptions(["--verifier", "bad"])).toHaveProperty("error");
@@ -326,23 +299,26 @@ describe("eval harness without --real (AC-M2)", () => {
       return p.profile;
     };
     expect(parseOptions([])).toMatchObject({ variants: null });
-    expect(parseOptions(["--variants", "callers, architecture"])).toMatchObject({ variants: ["callers", "architecture"] });
+    expect(parseOptions(["--variants", "handoff, architecture"])).toMatchObject({ variants: ["handoff", "architecture"] });
     // review-quality-2026.md WP-R1: the retired variants are unknown names.
     const retired = ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"];
-    const removed = ["broad", "verify2", "security2", "security2-verify", "refute-issue"];
-    for (const bad of ["bogus", ...retired, ...removed, "callers,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
+    const removed = ["broad", "verify2", "security2", "security2-verify", "refute-issue", "runs3"];
+    // Removed 2026-11-28.
+    removed.push("callers", "classes", "parts", "minor-fold", "codegraph");
+    for (const bad of ["bogus", ...retired, ...removed, "handoff,", ""]) expect(parseOptions(["--variants", bad])).toHaveProperty("error");
     expect(profileOf([]).variants).toEqual([]);
-    expect(profileOf(["--variants", "callers,architecture"]).variants).toEqual(["architecture", "callers"]);
+    expect(profileOf(["--variants", "handoff,architecture"]).variants).toEqual(["architecture", "handoff"]);
     expect(profileOf(["--variants", "obligations", "--rereview", "--profile-version", "4"]).variants).toEqual(["obligations"]);
   });
 
   test("--modules takes only module IDs of this app version, so a typo never runs a profile without the check", () => {
-    expect(parseOptions(["--modules", "security, failures"])).toMatchObject({ modules: ["security", "failures"] });
+    expect(parseOptions(["--modules", "security, intent"])).toMatchObject({ modules: ["security", "intent"] });
     expect(parseOptions(["--modules", ""])).toMatchObject({ modules: [] });
-    for (const bad of ["failure", "security,", "core"]) expect(parseOptions(["--modules", bad])).toHaveProperty("error");
-    const p = evalProfile(parseOptions(["--modules", "security,concurrency,api,rules,intent,failures"]) as Options);
+    // "failures": the trial module removed on 2026-11-28.
+    for (const bad of ["failure", "failures", "security,", "core"]) expect(parseOptions(["--modules", bad])).toHaveProperty("error");
+    const p = evalProfile(parseOptions(["--modules", "security,concurrency,api,rules,intent"]) as Options);
     if ("error" in p) throw new Error(p.error);
-    expect(p.profile.modules).toEqual(["security", "concurrency", "api", "rules", "intent", "failures"]);
+    expect(p.profile.modules).toEqual(["security", "concurrency", "api", "rules", "intent"]);
   });
 
   test("an invalid --model, --effort, --modules, or --variants exits 2 with the usage text", async () => {
@@ -353,7 +329,7 @@ describe("eval harness without --real (AC-M2)", () => {
       [
         "--variants",
         "rules2",
-        "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, stack, style55, submodules, twice.",
+        "--variants must be a comma list of architecture, git-history, handoff, lenses3, obligations, stack, style55, submodules, twice.",
       ],
       ["--modules", "failure", "--modules must be a comma list of security, concurrency,"],
     ] as const) {
@@ -552,7 +528,6 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(run?.agentCalls).toBeNumber();
       expect(run?.toolsPerCall).toBeNumber();
       expect(run?.opened).toBeArray();
-      expect(run).toMatchObject({ parts: 0, partsRead: 0 });
       // The echo check confirms each candidate.
       expect(run?.items.map((i) => [i.path, i.line, i.anchorState, i.verdict, i.check, i.group])).toEqual(
         findings.map((f) => [f.path, f.line, "exact", "confirmed", "checked", "main"]),
@@ -609,27 +584,6 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const again = JSON.parse(readFileSync(rescored, "utf8")) as EvalResult;
       expect(again.rescoredAt).toBeString();
       expect(score(again)).toEqual(score(result));
-
-      // docs/plans/review-v3.md WP-V14: the variant reads the diff of the run. A change under the R8 limits gets no part file.
-      const partsOut = join(dir, "parts");
-      const parted = await bun([
-        RUN,
-        "--cases",
-        c.id,
-        "--variants",
-        "parts",
-        "--out",
-        partsOut,
-        "--runner",
-        process.execPath,
-        FAKE,
-        scenario,
-      ]);
-      expect(parted.code).toBe(0);
-      const partsFile = readdirSync(partsOut).find((f) => f.endsWith(".json")) as string;
-      const partsResult = JSON.parse(readFileSync(join(partsOut, partsFile), "utf8")) as EvalResult;
-      expect(partsResult.promptVersion).toBe(`${REVIEW_PROMPT_VERSION}+parts`);
-      expect(partsResult.runs[0]).toMatchObject({ status: "completed", parts: 0, partsRead: 0 });
 
       // focused-passes.md WP-L2: each item of a lenses3 run carries its pass. The calls record 3 finder calls, then the verify call.
       const lensOut = join(dir, "lenses3");
@@ -862,16 +816,16 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
         "--verifier",
         "off",
         "--variants",
-        "callers,architecture",
+        "handoff,architecture",
         "--out",
         out,
       ];
       const r = await bun([RUN, ...args, "--runner", process.execPath, FAKE, scenario]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      const version = `${REVIEW_PROMPT_VERSION}+architecture+callers`;
+      const version = `${REVIEW_PROMPT_VERSION}+architecture+handoff`;
       expect(r.stdout).toContain(
-        `with variants callers, architecture, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
+        `with variants handoff, architecture, model haiku, effort low, reviewer mode auto, verifier off, verifier effort medium, prompt version ${version}`,
       );
       expect(r.stdout).not.toContain(DEFAULT_MODEL_WARNING);
       const argv = readRecords<{ argv: string[] }>(record).find((x) => x.argv.includes("-p"))?.argv ?? [];
@@ -881,7 +835,7 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       const files = readdirSync(out).filter((f) => f.endsWith(".json"));
       const a = JSON.parse(readFileSync(join(out, files[0] as string), "utf8")) as EvalResult;
       expect(a.requested).toEqual({ model: "haiku", effort: "low", verifier: "off", verifierEffort: "medium", reviewerMode: "auto" });
-      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["architecture", "callers"] });
+      expect(a.profile).toMatchObject({ model: "haiku", effort: "low", verifier: { mode: "off" }, variants: ["architecture", "handoff"] });
       expect(a.promptVersion).toBe(version);
       const [run] = a.runs;
       expect(run).toMatchObject({ status: "completed", effort: "low" });
@@ -1113,9 +1067,9 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(refusal(["--repeat", "2"])).toContain("the recording has 1 repeats, but this run asks for 2");
       expect(refusal([], { ...a, promptVersion: "2.0" })).toContain("the recording ran finder prompt version 2.0");
       expect(refusal(["--verifier", "off"])).toContain("changes the finder setup of the recording: verifier.");
-      // obligations changes only the verify prompts. callers changes the finder.
+      // obligations changes only the verify prompts. handoff changes the finder.
       expect(refusal(["--variants", "obligations"])).toBeNull();
-      expect(refusal(["--variants", "callers"])).toContain("the recording ran finder prompt version");
+      expect(refusal(["--variants", "handoff"])).toContain("the recording ran finder prompt version");
       // An old recording with a removed verify-only variant replays. One with a removed finder variant is refused.
       const removed = (v: string) => ({ ...a, promptVersion: `${a.promptVersion}+${v}`, profile: { ...a.profile, variants: [v] } });
       for (const v of ["verify2", "refute-issue", "security2-verify"]) expect(refusal([], removed(v))).toBeNull();
@@ -1126,6 +1080,9 @@ describe("eval harness with the fake CLI (AC-M3)", () => {
       expect(refusal([], twiceRec)).toContain(twice);
       expect(refusal(["--variants", "twice"], twiceRec)).toContain(twice);
       expect(refusal([], removed("broad"))).toContain(`the recording ran finder prompt version ${a.promptVersion}+broad`);
+      // Removed 2026-11-28: a recording with one of these variants gives a refusal, not a throw.
+      for (const v of ["callers", "classes", "parts", "minor-fold", "codegraph"])
+        expect(refusal([], removed(v))).toContain(`the recording ran finder prompt version ${a.promptVersion}+${v}`);
 
       // A flag that changes the finder exits 2 before any run.
       const flag = await run("flag", [], ["--cases", ids, "--replay-find", rec.file, "--effort", "low"]);

@@ -4,7 +4,7 @@
 // Review profiles settings (M4, BRIEF US9): name, note, prompt, Explain, Docs, turn cap, and the run setup, in the order of the review brief.
 // Each change saves by itself (autosave.tsx). A field with a problem stays unsaved until the user fixes it.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, CircleAlert, Copy, CopyPlus, Plus, RotateCcw, Sparkles, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, CircleAlert, Copy, CopyPlus, Plus, RotateCcw, Sparkles, X } from "lucide-react";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,6 @@ import {
   type ReviewerMode,
   type SettingsDto,
   type SkillDto,
-  TRIAL_MODULES,
   VERIFIER_OUTCOMES,
   type VerifierOutcome,
   VOLUMES,
@@ -52,6 +51,7 @@ import {
   defaultChoice,
   type Edit,
   EFFORT_CHOICES,
+  EXPERIMENTAL,
   editedOf,
   type Field,
   fieldWords,
@@ -846,6 +846,7 @@ function ProfileRow(rowProps: RowProps) {
       <ChecksField {...props} />
       <RunSetup {...props} found={found} />
       {props.shipped && <ShippedEdits {...props} shipped={props.shipped} />}
+      <Experimental {...props} />
       {errors.length > 0 && (
         <div className="col-span-full grid gap-1">
           {errors.map((f) => (
@@ -857,6 +858,39 @@ function ProfileRow(rowProps: RowProps) {
         </div>
       )}
     </li>
+  );
+}
+
+// The opt-in variants without a proven gain. The fold starts closed, and its summary counts the switches that are on.
+function Experimental(props: RowProps) {
+  const { d, i, onChange } = props;
+  const of = <span className="sr-only"> of profile {i + 1}</span>;
+  const on = EXPERIMENTAL.filter(([v]) => d.variants.includes(v)).length;
+  return (
+    <details id={profileId(i, "experimental")} className="group col-span-full">
+      <summary className="rl-hit inline-flex cursor-pointer items-center gap-1 rounded text-sm font-medium text-ink-2 hover:text-foreground">
+        <ChevronRight aria-hidden className="rl-chev size-[15px] shrink-0" />
+        Experimental{on ? ` (${on} on)` : ""}
+        {of}
+      </summary>
+      <div className="mt-2 flex flex-wrap gap-x-8 gap-y-2 pl-5">
+        {EXPERIMENTAL.map(([v, label, help]) => (
+          <Toggle
+            key={v}
+            id={profileId(i, v)}
+            label={
+              <>
+                {label}
+                {of}
+              </>
+            }
+            help={help}
+            checked={d.variants.includes(v)}
+            onChange={(x) => onChange({ act: "edit", i, patch: { variants: withVariant(d.variants, v, x) } })}
+          />
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -881,7 +915,7 @@ function ChecksField(props: RowProps) {
         <p className="m-0 text-xs text-muted-foreground">{off ?? "Each check adds a checklist to review runs of this profile."}</p>
       </div>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-x-4 gap-y-1">
-        {MODULE_IDS.filter((m) => !TRIAL_MODULES.includes(m)).map((m) => (
+        {MODULE_IDS.map((m) => (
           <label key={m} className="flex min-h-6 cursor-pointer items-center gap-2 text-sm text-foreground has-disabled:cursor-default">
             <input
               type="checkbox"

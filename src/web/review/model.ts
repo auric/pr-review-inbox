@@ -626,10 +626,9 @@ export const MODULE_LABEL: Record<ModuleId, string> = {
   simplify: "Simplify (what to delete)",
   rules: "Project rules",
   intent: "Matches the task",
-  failures: "Failure paths",
 };
 // spec.md section 1.1: the checks in view, then the checks under "More checks". The language checklists are the profile field
-// languageChecks, the last one under "More checks". TRIAL_MODULES are in neither list.
+// languageChecks, the last one under "More checks".
 export const SHOWN_CHECKS: readonly ModuleId[] = ["security", "concurrency", "performance", "tests", "api", "simplify"];
 export const MORE_CHECKS: readonly ModuleId[] = ["docs", "rules", "intent"];
 export const LANGUAGE_LABEL = "Language checklists (C++, C, Python, C#)";
@@ -722,6 +721,10 @@ export const runCopy = (it: ReviewItemDto) => (it.payload as FindingPayload).ver
 // thorough-review.md D5: the Run setup line of a Thorough review. null: a one-run review.
 export const runsText = (s: RunSummary | null | undefined) =>
   s?.runs ? `${s.runs.count} runs at once. ${plural(s.runs.copies, "repeated finding")} hidden.` : null;
+
+// The run setup line of a review run with changed files that no agent read. null: none, or the run did not count them.
+export const unreadText = (s: RunSummary | null | undefined) =>
+  s?.unreadFiles ? `${plural(s.unreadFiles, "changed file")} that no agent read.` : null;
 
 // The title of a draft row. A finding from before review v2 has no title, so the row shows its body.
 export const draftTitle = (it: ReviewItemDto) => (it.kind === "finding" && (it.payload as FindingPayload).title?.trim()) || it.body;

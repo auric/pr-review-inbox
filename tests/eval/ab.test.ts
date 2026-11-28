@@ -165,8 +165,8 @@ beforeAll(async () => {
 const opts = (o: Partial<AbOptions> = {}): AbOptions => ({
   repeat: "1",
   candidateRepeat: null,
-  variants: ["classes", "callers"],
-  modules: ["failures"],
+  variants: ["architecture", "handoff"],
+  modules: ["tests"],
   baseEffort: null,
   effort: null,
   reviewerEffort: null,
@@ -278,7 +278,7 @@ describe("eval:ab --baseline checks", () => {
       if ("error" in o) throw new Error(o.error);
       return o;
     };
-    const cut = ["--clean", "8", "--repeat", "2", "--candidate-variants", "classes", "--candidate-effort", "low", "--review-only"];
+    const cut = ["--clean", "8", "--repeat", "2", "--candidate-variants", "architecture", "--candidate-effort", "low", "--review-only"];
     const saved = runFlags(parsed(cut));
     expect(flagsRefusal(saved, parsed(cut))).toBeNull();
     // A flags file made before --candidate-verifier-model still resumes.
@@ -286,7 +286,10 @@ describe("eval:ab --baseline checks", () => {
     expect(flagsRefusal(older, parsed(cut))).toBeNull();
     // A changed or dropped flag of the cut run, and a flag that it did not have.
     const changes: [string[], string][] = [
-      [cut.map((x) => (x === "classes" ? "callers" : x)), "--candidate-variants classes, but this run has --candidate-variants callers."],
+      [
+        cut.map((x) => (x === "architecture" ? "handoff" : x)),
+        "--candidate-variants architecture, but this run has --candidate-variants handoff.",
+      ],
       [cut.map((x) => (x === "low" ? "high" : x)), "--candidate-effort low, but this run has --candidate-effort high."],
       [
         [...cut, "--candidate-reviewer-effort", "high"],
@@ -528,12 +531,12 @@ describe("eval:ab arguments", () => {
       "fake",
     ]);
     expect(runArgs("review", "candidate", opts(), "o")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "classes,callers", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "architecture,handoff", "--modules", `${shippedModules},tests`],
       ...["--ordinals", "--out", "o", "--runner", "fake"],
     ]);
     // --candidate-effort: only the candidate gets --effort.
     expect(runArgs("review", "candidate", opts({ effort: "xhigh" }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--variants", "classes,callers", "--modules", `${shippedModules},failures`],
+      ...["--set", "local", "--repeat", "1", "--variants", "architecture,handoff", "--modules", `${shippedModules},tests`],
       ...["--effort", "xhigh", "--ordinals", "--runner", "fake"],
     ]);
     expect(runArgs("review", "baseline", opts({ effort: "xhigh" }), "")).not.toContain("--effort");
@@ -556,8 +559,8 @@ describe("eval:ab arguments", () => {
     ]);
     // A re-review candidate gets the same variants as a review candidate.
     expect(runArgs("rereview", "candidate", opts({ runner: null }), "")).toEqual([
-      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "classes,callers"],
-      ...["--modules", `${shippedModules},failures`, "--ordinals", "--real"],
+      ...["--set", "local", "--repeat", "1", "--rereview", "--variants", "architecture,handoff"],
+      ...["--modules", `${shippedModules},tests`, "--ordinals", "--real"],
     ]);
     // Bisect: no variants and no extra module.
     const bare = opts({ variants: [], modules: [] });
@@ -570,21 +573,21 @@ describe("eval:ab arguments", () => {
 
   // review-quality-2026.md WP-R1: the retired variants are refused before any build.
   test("--candidate-variants takes the opt-in variants and refuses the retired variants", () => {
-    expect(parseAb(["--candidate-variants", "callers,classes"])).toMatchObject({ variants: ["callers", "classes"] });
-    // review-quality-2026.md item 7.
-    expect(parseAb(["--candidate-variants", "classes"])).toMatchObject({ variants: ["classes"] });
-    // review-v3.md D2, the caller rule, with the flags of the Gate A command.
+    expect(parseAb(["--candidate-variants", "handoff,architecture"])).toMatchObject({ variants: ["handoff", "architecture"] });
+    expect(parseAb(["--candidate-variants", "architecture"])).toMatchObject({ variants: ["architecture"] });
+    // The flags of the Gate A command.
     const gate = ["--review-only", "--clean", "8", "--repeat", "2"];
-    expect(parseAb([...gate, "--candidate-variants", "callers"])).toMatchObject({ variants: ["callers"], repeat: "2", reviewOnly: true });
+    expect(parseAb([...gate, "--candidate-variants", "handoff"])).toMatchObject({ variants: ["handoff"], repeat: "2", reviewOnly: true });
     // Prompt 2.9 ships "preexisting" and "risk-check" as defaults, so their names are retired. The variants that failed their gates
-    // were removed on 2026-11-27.
+    // were removed on 2026-11-27 and 2026-11-28.
     for (const retired of [
       ...["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"],
-      ...["broad", "verify2", "security2", "security2-verify", "refute-issue"],
+      ...["broad", "verify2", "security2", "security2-verify", "refute-issue", "runs3"],
+      ...["callers", "classes", "parts", "minor-fold", "codegraph"],
     ])
       expect(parseAb(["--candidate-variants", retired])).toMatchObject({
         error: expect.stringContaining(
-          "--variants must be a comma list of architecture, callers, classes, codegraph, git-history, handoff, lenses3, minor-fold, obligations, parts, stack, style55, submodules, twice.",
+          "--variants must be a comma list of architecture, git-history, handoff, lenses3, obligations, stack, style55, submodules, twice.",
         ),
       });
   });
@@ -630,10 +633,10 @@ describe("eval:ab arguments", () => {
       ["--candidate-effort", "low"],
       ["--candidate-reviewer-effort", "low"],
       ["--candidate-reviewer-mode", "off"],
-      ["--candidate-modules", "failures"],
-      ["--candidate-variants", "classes"],
-      // review-v3.md D2: the caller rule changes the finder prompt.
-      ["--candidate-variants", "callers"],
+      ["--candidate-modules", "tests"],
+      ["--candidate-variants", "architecture"],
+      // delegation-gaps.md: handoff changes the rl-reviewer prompt.
+      ["--candidate-variants", "handoff"],
       // catalog.ts checked(): the verify mode changes the finder prompt.
       ["--candidate-verifier", "off"],
     ])
@@ -770,7 +773,7 @@ describe("eval:ab end to end with the fake CLI", () => {
       expect(r.stdout).toContain("[1/1] case 1 #1:");
       // The default candidate adds nothing to the shipped profile.
       expect(a.profile.variants).toEqual([]);
-      expect(a.profile.modules).not.toContain("failures");
+      expect(a.profile.modules).not.toContain("tests");
       expect(b.profile.variants).toEqual([]);
       expect(b.profile.modules).toEqual(a.profile.modules);
       expect(a.requested?.effort).not.toBe("low");

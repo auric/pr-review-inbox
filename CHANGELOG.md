@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Review profiles: each profile has a closed "Experimental" section at the bottom. It has switches for "Three focused passes", "Helper handoff", "Design rules", and "Companion edits and criteria". Each switch has one line that says what it costs and that it has no proven gain.
+- Review: the run details show "N changed files that no agent read." when a review did not open every changed file. The count costs no Claude usage.
 - Review profiles: the new switch "Git history" lets a review run read why the changed lines were written, from the git history. It is off by default.
 - Build a Jira task: the questions screen has "Copy as Markdown" and "Save .md". They give you the open questions with their options, so you can answer them in your own Claude Code session first.
 - My PRs: your open pull request that nobody has answered now shows under "Waiting on others" with "Waiting for review.", or "Approved." when every reviewer approved. Before, it showed under Done with "No new messages."

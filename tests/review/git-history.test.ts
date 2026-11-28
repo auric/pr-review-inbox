@@ -34,11 +34,7 @@ const GOAL: ReviewContext = { ...NO_CONTEXT, taskFile: true, goal: true, prConte
 const REREVIEW: ReviewContext = { ...NO_CONTEXT, rereview: true };
 const CONTEXTS = [NO_CONTEXT, GOAL, REREVIEW];
 const lines = (prompt: string) => prompt.split("\n");
-const finders = (p: Shipped, c: ReviewContext, lens: Lens | null = null) => [
-  mainAgent(p, c, lens),
-  reviewerAgent(p, c, false, lens),
-  reviewerAgent(p, c, true, lens),
-];
+const finders = (p: Shipped, c: ReviewContext, lens: Lens | null = null) => [mainAgent(p, c, lens), reviewerAgent(p, c, lens)];
 const others = (p: Shipped, c: ReviewContext) => [
   explainAgent(p),
   verifyAgent(p, c),
@@ -70,7 +66,7 @@ describe("variant git-history (git-history.md WP-GH1)", () => {
       for (const c of CONTEXTS) {
         const base = finders(p, c);
         const gh = finders(withV(p, "git-history"), c);
-        const stacked = finders(withV(p, "callers", "architecture", "git-history"), c);
+        const stacked = finders(withV(p, "architecture", "git-history"), c);
         for (let i = 0; i < base.length; i++) {
           const a = lines(gh[i]?.prompt ?? "");
           const k = once(a);
@@ -89,14 +85,13 @@ describe("variant git-history (git-history.md WP-GH1)", () => {
 
   test("AC-GH2: with handoff, rl-reviewer holds the rl-git tool lines and the block once each", () => {
     for (const p of reviewProfiles)
-      for (const c of CONTEXTS)
-        for (const parts of [false, true]) {
-          const l = lines(reviewerAgent(withV(p, "handoff", "git-history"), c, parts).prompt);
-          const g = at(l, gitToolLines(c.rereview));
-          expect(g).toBeGreaterThan(-1);
-          for (const x of gitToolLines(c.rereview)) expect(l.filter((y) => y === x)).toHaveLength(1);
-          expect(once(l)).toBeGreaterThan(g);
-        }
+      for (const c of CONTEXTS) {
+        const l = lines(reviewerAgent(withV(p, "handoff", "git-history"), c).prompt);
+        const g = at(l, gitToolLines(c.rereview));
+        expect(g).toBeGreaterThan(-1);
+        for (const x of gitToolLines(c.rereview)) expect(l.filter((y) => y === x)).toHaveLength(1);
+        expect(once(l)).toBeGreaterThan(g);
+      }
   });
 
   test("AC-GH3: Explain, the verify agents, the verifier, and salvage do not change", () => {

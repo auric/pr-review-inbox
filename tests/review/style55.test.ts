@@ -35,7 +35,7 @@ const FULL: ReviewContext = { ...NO_CONTEXT, taskFile: true, history: true, ques
 const CONTEXTS = [NO_CONTEXT, SUBMODULES, PARENT, FULL];
 const reviewProfiles = SHIPPED_PROFILES.filter((x) => !x.explain);
 const lines = (prompt: string) => prompt.split("\n");
-const finders = (p: Shipped, c: ReviewContext) => [mainAgent(p, c), reviewerAgent(p, c, false), reviewerAgent(p, c, true), salvageAgent(p)];
+const finders = (p: Shipped, c: ReviewContext) => [mainAgent(p, c), reviewerAgent(p, c), salvageAgent(p)];
 const verifiers = (p: Shipped, c: ReviewContext) => [
   verifyAgent(p, c),
   verifyAgent(p, c, true, true, true),
@@ -88,8 +88,8 @@ describe("variant style55 (opus55-prompting.md section 8.1)", () => {
           const l = lines(a.prompt);
           const k = l.indexOf(ONLY);
           expect(k).toBeGreaterThan(-1);
-          // Salvage (index 3) gets no context files, so it has no stack lines.
-          const block = [...PREEXISTING_LINES, ...(c.stack?.parent && i < 3 ? STACK_PREEXISTING : [])];
+          // Salvage (index 2) gets no context files, so it has no stack lines.
+          const block = [...PREEXISTING_LINES, ...(c.stack?.parent && i < 2 ? STACK_PREEXISTING : [])];
           expect(l.slice(k + 1, k + 1 + block.length)).toEqual(block);
           expect(l[k + 1 + block.length]).toBe(`${ANCHOR} ${REASONS_55[ANCHOR]}`);
           for (const x of block) expect(count(l, x)).toBe(1);

@@ -1,7 +1,10 @@
 # Re-measure plan: opt-in review variants
 
 Status: plan of 2026-11-27, written against main a8e0ca3. It is not approved yet. The user approves each paid run. "Guess" marks an estimate. Results go to docs/eval/results.md as aggregate numbers only.
+
 User decision of 2026-11-27: git-history gets no paid measurement. It stays opt-in, and the profile editor gets a "Git history" switch. The user runs it with a Jira MCP server, which the eval cannot give. So M2, M4, M8, WP-RM3, and WP-RM4 are parked. The low-effort subset pilot E-LOW started on 2026-11-27 before this plan; M5 stays the full-set design.
+
+Removed: runs3 on 2026-11-27, and callers, classes, parts, minor-fold, and codegraph on 2026-11-28. The rows below that name them stay as history. lenses3, handoff, architecture, and obligations have switches under "Experimental" in the profile editor.
 
 ## 0. Short answer
 

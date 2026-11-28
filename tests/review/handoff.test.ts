@@ -57,17 +57,17 @@ describe("variant handoff (delegation-gaps.md fixes 1, 3, and 4)", () => {
     const pins = {
       auto: sha(withDelegation(mainAgent(general, FULL), "auto").prompt),
       always: sha(withDelegation(mainAgent(general, FULL), "always").prompt),
-      parts: sha(withDelegation(mainAgent(general, FULL), "auto", 3).prompt),
+      // The pin of ca795d1 also held the line of the variant "parts" (removed 2026-11-28) at the end of the second prompt. With that
+      // line, the hash is still 7b8c0aa5.
       reviewer: sha(
-        [reviewerAgent(general, FULL), reviewerAgent(general, { ...FULL, rereview: true }, true)].map((a) => a.prompt).join("\n---\n"),
+        [reviewerAgent(general, FULL), reviewerAgent(general, { ...FULL, rereview: true })].map((a) => a.prompt).join("\n---\n"),
       ),
       mcp: sha([...mcpLines(USED, true), "---", ...mcpLines(USED, false)].join("\n")),
     };
     expect(pins).toEqual({
       auto: "d8f1bacef6d6ef339404cb70eeba63a182789f3944ab4fd38e64f61953484f63",
       always: "ada3a400ef022f50b981b7008e4149b63b52ec987b027f108356809bcffa52b3",
-      parts: "170eeec0e47f2b75632eccd5c77239173ad70bf0d431a3a60e73100ca35cc30c",
-      reviewer: "7b8c0aa5ef2b7aa9c32b9d0cd08d5db699a9a79b7ec94443f1d54bac3d29d8de",
+      reviewer: "e67da7e8c165033d8dfb27edbe344776a7298f392f026f00cecbfe984f308b17",
       mcp: "1033bf4c74a3fc65962a001d2b4f99eb420489d45db0ac1993176e4afb200679",
     });
     for (const p of SHIPPED_PROFILES) expect(handoff(p)).toBe(false);
@@ -75,38 +75,31 @@ describe("variant handoff (delegation-gaps.md fixes 1, 3, and 4)", () => {
 
   test("rl-main keeps its prompt; rl-reviewer gets exactly the trigger search, the rl-git lines, and HANDOFF_REVIEWER", () => {
     for (const p of SHIPPED_PROFILES.filter((x) => !x.explain))
-      for (const c of [NO_CONTEXT, FULL, { ...FULL, rereview: true }])
-        for (const parts of [false, true]) {
-          const on = withV(p);
-          expect(mainAgent(on, c).prompt).toBe(mainAgent(p, c).prompt);
-          const base = lines(reviewerAgent(p, c, parts).prompt);
-          const got = lines(reviewerAgent(on, c, parts).prompt);
-          const git = gitToolLines(c.rereview);
-          // The rl-git lines follow the context block.
-          const k = got.indexOf(git[0] as string);
-          expect(got.slice(k - contextBlock(c).length, k)).toEqual(contextBlock(c));
-          expect(got.slice(k, k + 2)).toEqual(git);
-          // The trigger search follows the trigger line, as in rl-main.
-          expect(got[got.indexOf(TRIGGER) + 1]).toBe(SEARCH);
-          expect(got.slice(-HANDOFF_REVIEWER.length)).toEqual(HANDOFF_REVIEWER);
-          const added = [...git, SEARCH, ...HANDOFF_REVIEWER];
-          for (const x of added) expect(got.filter((y) => y === x)).toHaveLength(1);
-          expect(got.filter((x) => !added.includes(x))).toEqual(base);
-          expect(got).toHaveLength(base.length + added.length);
-        }
+      for (const c of [NO_CONTEXT, FULL, { ...FULL, rereview: true }]) {
+        const on = withV(p);
+        expect(mainAgent(on, c).prompt).toBe(mainAgent(p, c).prompt);
+        const base = lines(reviewerAgent(p, c).prompt);
+        const got = lines(reviewerAgent(on, c).prompt);
+        const git = gitToolLines(c.rereview);
+        // The rl-git lines follow the context block.
+        const k = got.indexOf(git[0] as string);
+        expect(got.slice(k - contextBlock(c).length, k)).toEqual(contextBlock(c));
+        expect(got.slice(k, k + 2)).toEqual(git);
+        // The trigger search follows the trigger line, as in rl-main.
+        expect(got[got.indexOf(TRIGGER) + 1]).toBe(SEARCH);
+        expect(got.slice(-HANDOFF_REVIEWER.length)).toEqual(HANDOFF_REVIEWER);
+        const added = [...git, SEARCH, ...HANDOFF_REVIEWER];
+        for (const x of added) expect(got.filter((y) => y === x)).toHaveLength(1);
+        expect(got.filter((x) => !added.includes(x))).toEqual(base);
+        expect(got).toHaveLength(base.length + added.length);
+      }
   });
 
-  test("the delegation lines get HANDOFF_DELEGATE last in modes auto, always, and parts", () => {
+  test("the delegation lines get HANDOFF_DELEGATE last in modes auto and always", () => {
     const main = mainAgent(general, FULL);
-    for (const [mode, parts] of [
-      ["auto", 0],
-      ["always", 0],
-      ["auto", 3],
-    ] as const)
-      expect(withDelegation(main, mode, parts, true).prompt).toBe(
-        [withDelegation(main, mode, parts).prompt, ...HANDOFF_DELEGATE].join("\n"),
-      );
-    expect(withDelegation(main, null, 0, true)).toBe(main);
+    for (const mode of ["auto", "always"] as const)
+      expect(withDelegation(main, mode, true).prompt).toBe([withDelegation(main, mode).prompt, ...HANDOFF_DELEGATE].join("\n"));
+    expect(withDelegation(main, null, true)).toBe(main);
   });
 
   test("the issue lines of rl-reviewer name the context files, not the Metadata section", () => {
@@ -121,7 +114,7 @@ describe("variant handoff (delegation-gaps.md fixes 1, 3, and 4)", () => {
   // The stdin bytes, the rl-git lines included, stay pinned by the run kind hashes in prompt.test.ts.
   test("the prompt version gets +handoff", () => {
     expect(promptVersion(withV(general))).toBe(`${REVIEW_PROMPT_VERSION}+handoff`);
-    expect(promptVersion(withV({ ...general, variants: ["parts"] }))).toBe(`${REVIEW_PROMPT_VERSION}+handoff+parts`);
+    expect(promptVersion(withV({ ...general, variants: ["architecture"] }))).toBe(`${REVIEW_PROMPT_VERSION}+architecture+handoff`);
   });
 
   test("ASD-STE100: every new line has at most 20 words in a sentence", () => {

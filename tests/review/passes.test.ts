@@ -128,13 +128,12 @@ function defaultBytes() {
       agents.push(
         mainAgent(p, c).prompt,
         reviewerAgent(p, c).prompt,
-        reviewerAgent(p, c, true).prompt,
         verifyAgent(p, c, true, true, true).prompt,
         verifierAgent(p, c, true, true).prompt,
         salvageAgent(p).prompt,
       );
   const stdin = [buildPrompt(input), buildPrompt({ ...input, questions: false })];
-  const schemas = [reviewJsonSchema(false, false), reviewJsonSchema(true, false), verifyJsonSchema(false), verifyJsonSchema(true)];
+  const schemas = [reviewJsonSchema(false), reviewJsonSchema(true), verifyJsonSchema(false), verifyJsonSchema(true)];
   const cands: Candidate[] = [1, 2, 3].map((l, i) => ({ n: i + 1, finding: finding(l), group: l < 3 ? 1 : null, from: null }));
   const file = candidatesFile(cands, [{ text: "Q?", why: "W." }], ["Risk."]).file.text;
   return {
@@ -148,7 +147,9 @@ function defaultBytes() {
 describe("variant lenses3: prompts (focused-passes.md WP-L1)", () => {
   test("without the variants, every prompt, the stdin, both schemas, and candidates.md keep the bytes of main", () => {
     expect(defaultBytes()).toEqual({
-      agents: "ef2425086d5d5a9675e0bc1f6da32165cb0b074200ff88df6f0e10eee7db9148",
+      // The pin of 1177784 also held rl-reviewer with the line of the variant "parts" (removed 2026-11-28). With it, the hash is
+      // still ef242508.
+      agents: "b3dd2e462b1f54479c263490e8edccd292d3d73a156ac5148cd773364abaa519",
       stdin: "6e2209d2e28204fe397333590c8813ac50a96c659cb7dba9b55ccd4b037a62bc",
       schemas: "ba9856660e7af30f719ff44e874af06e6defd430ed222db830311e8f814484fe",
       candidates: "d80a93c3b1ebd4eb0d7857f3b53bd99eea168143571c4ce11d9511f4c373b32d",
@@ -157,7 +158,7 @@ describe("variant lenses3: prompts (focused-passes.md WP-L1)", () => {
       expect(passLenses(p)).toEqual([]);
       for (const c of [NO_CONTEXT, FULL]) {
         expect(mainAgent(p, c, null)).toEqual(mainAgent(p, c));
-        expect(reviewerAgent(p, c, true, null)).toEqual(reviewerAgent(p, c, true));
+        expect(reviewerAgent(p, c, null)).toEqual(reviewerAgent(p, c));
       }
     }
   });
@@ -177,37 +178,32 @@ describe("variant lenses3: prompts (focused-passes.md WP-L1)", () => {
     expect(promptVersion(withV(general, "lenses3"))).toBe(`${REVIEW_PROMPT_VERSION}+lenses3`);
   });
 
-  test("each lens sits in the slot of the caller lines in rl-main and rl-reviewer; only the block differs", () => {
+  test("each lens follows the finder rules in rl-main and rl-reviewer, before the do-not-flag list; only the block differs", () => {
     const p = general;
-    const call = withV(p, "callers");
     for (const lens of LENSES)
       for (const c of [NO_CONTEXT, FULL])
-        for (const [base, lensed, called] of [
-          [mainAgent(p, c), mainAgent(p, c, lens), mainAgent(call, c)],
-          [reviewerAgent(p, c, true), reviewerAgent(p, c, true, lens), reviewerAgent(call, c, true)],
+        for (const [base, lensed] of [
+          [mainAgent(p, c), mainAgent(p, c, lens)],
+          [reviewerAgent(p, c), reviewerAgent(p, c, lens)],
         ] as const) {
           const l = lines(lensed.prompt);
           const block = LENS_LINES[lens];
           const k = at(l, block);
           expect(k).toBeGreaterThan(-1);
           expect([...l.slice(0, k), ...l.slice(k + block.length)]).toEqual(lines(base.prompt));
-          const cl = lines(called.prompt);
-          expect(l[k - 1]).toBe(cl[at(cl, CALLERS_LINES) - 1]);
+          expect(l[k + block.length]).toStartWith("Do not report the points below.");
         }
   });
 
-  test("L2 holds CALLERS_LINES, then ARCHITECTURE_LINES; stacked with callers and architecture, each line appears once", () => {
-    // focus() keeps the first copy of a line. The two constants share no line, so callers plus architecture keep their bytes.
+  test("L2 holds CALLERS_LINES, then ARCHITECTURE_LINES; stacked with architecture, each line appears once", () => {
+    // focus() keeps the first copy of a line. The two constants share no line.
     expect(CALLERS_LINES.filter((x) => ARCHITECTURE_LINES.includes(x))).toEqual([]);
     const l = lines(mainAgent(general, FULL, "contract").prompt);
     expect(at(l, ARCHITECTURE_LINES)).toBeGreaterThan(at(l, CALLERS_LINES));
-    for (const stacked of [withV(general, "callers"), withV(general, "callers", "architecture")]) {
-      const s = lines(mainAgent(stacked, FULL, "contract").prompt);
-      for (const x of LENS_LINES.contract) expect([x, s.filter((y) => y === x).length]).toEqual([x, 1]);
-      expect(at(s, CALLERS_LINES)).toBeGreaterThan(-1);
-      expect(at(s, ARCHITECTURE_LINES)).toBeGreaterThan(at(s, CALLERS_LINES));
-      expect(s.indexOf("Look hardest at how the change fits the code outside the diff.")).toBeGreaterThan(at(s, CALLERS_LINES));
-    }
+    const s = lines(mainAgent(withV(general, "architecture"), FULL, "contract").prompt);
+    for (const x of LENS_LINES.contract) expect([x, s.filter((y) => y === x).length]).toEqual([x, 1]);
+    // The architecture block comes first, so the lens keeps only its other lines.
+    expect(at(s, ARCHITECTURE_LINES)).toBeLessThan(at(s, CALLERS_LINES));
   });
 
   test("the lens text: at most 20 words per sentence, the closing line, and no line that narrows the finder", () => {

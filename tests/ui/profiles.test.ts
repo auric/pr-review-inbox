@@ -12,6 +12,7 @@ import {
   copyTargets,
   type Draft,
   defaultChoice,
+  EXPERIMENTAL,
   editedOf,
   fieldWords,
   focusAfter,
@@ -468,29 +469,39 @@ describe("the no flag choice", () => {
 });
 
 describe("stack, submodules, twice, and git history switches", () => {
+  test("the Experimental fold has the four unproven variants with one short help line each; style55 has no switch yet", () => {
+    expect(EXPERIMENTAL.map(([v]) => v)).toEqual(["lenses3", "handoff", "architecture", "obligations"]);
+    for (const [, label, help] of EXPERIMENTAL) {
+      expect(label.length).toBeGreaterThan(0);
+      for (const s of help.split(/(?<=[.!?])\s+/)) expect(s.split(/\s+/).length).toBeLessThanOrEqual(20);
+    }
+    expect(EXPERIMENTAL.some(([v]) => (v as string) === "style55")).toBe(false);
+  });
+
   test("withVariant changes only its own name and keeps the VARIANTS order", () => {
-    expect(withVariant(["lenses3", "codegraph"], "stack", true)).toEqual(["codegraph", "lenses3", "stack"]);
-    expect(withVariant(["codegraph", "stack", "submodules"], "stack", false)).toEqual(["codegraph", "submodules"]);
+    expect(withVariant(["lenses3", "style55"], "stack", true)).toEqual(["lenses3", "stack", "style55"]);
+    expect(withVariant(["style55", "stack", "submodules"], "stack", false)).toEqual(["style55", "submodules"]);
     expect(withVariant([], "submodules", false)).toEqual([]);
     expect(withVariant(["submodules"], "submodules", true)).toEqual(["submodules"]);
-    expect(withVariant(["stack", "callers"], "twice", true)).toEqual(["callers", "stack", "twice"]);
-    expect(withVariant(["twice", "callers"], "twice", false)).toEqual(["callers"]);
-    expect(withVariant(["twice", "callers"], "git-history", true)).toEqual(["callers", "git-history", "twice"]);
+    expect(withVariant(["stack", "handoff"], "twice", true)).toEqual(["handoff", "stack", "twice"]);
+    expect(withVariant(["twice", "handoff"], "twice", false)).toEqual(["handoff"]);
+    expect(withVariant(["twice", "handoff"], "git-history", true)).toEqual(["git-history", "handoff", "twice"]);
     expect(withVariant(["git-history", "style55"], "git-history", false)).toEqual(["style55"]);
   });
 
   test("an edit of the switch saves the server form, so the saved list compares equal", () => {
-    const saved = p("general", "General", { variants: ["codegraph", "lenses3"] });
+    // style55 has no switch in the editor, so a save must keep it.
+    const saved = p("general", "General", { variants: ["lenses3", "style55"] });
     const next = change(toDrafts([saved]), {
       act: "edit",
       i: 0,
-      patch: { variants: withVariant(["codegraph", "lenses3"], "stack", true) },
+      patch: { variants: withVariant(["lenses3", "style55"], "stack", true) },
     });
     const out = toProfiles(next);
     const parsed = profileInput.parse(out[0]);
-    expect(parsed.variants).toEqual(["codegraph", "lenses3", "stack"]);
+    expect(parsed.variants).toEqual(["lenses3", "stack", "style55"]);
     expect(sameProfiles(out, [parsed])).toBe(true);
-    expect(toProfiles(change(next, { act: "duplicate", i: 0 }))[1]?.variants).toEqual(["codegraph", "lenses3", "stack"]);
+    expect(toProfiles(change(next, { act: "duplicate", i: 0 }))[1]?.variants).toEqual(["lenses3", "stack", "style55"]);
   });
 });
 

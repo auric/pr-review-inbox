@@ -8,7 +8,6 @@ import {
   ARCHITECTURE_LINES,
   ARCHITECTURE_VERIFY,
   architecture,
-  CALLERS_LINES,
   DO_NOT_FLAG,
   mainAgent,
   NO_CONTEXT,
@@ -32,7 +31,7 @@ const withV = (p: Shipped, ...v: Variant[]) => ({ ...p, variants: [...p.variants
 const GOAL: ReviewContext = { ...NO_CONTEXT, taskFile: true, goal: true, prContext: true };
 const lines = (prompt: string) => prompt.split("\n");
 const ALL = [...ARCHITECTURE_LINES, ...ARCHITECTURE_VERIFY];
-const finders = (p: Shipped, c: ReviewContext) => [mainAgent(p, c), reviewerAgent(p, c), reviewerAgent(p, c, true)];
+const finders = (p: Shipped, c: ReviewContext) => [mainAgent(p, c), reviewerAgent(p, c)];
 const verifiers = (p: Shipped, c: ReviewContext) => [
   verifyAgent(p, c),
   verifyAgent(p, c, true, true, true),
@@ -51,7 +50,7 @@ describe("variant architecture (architecture-bugs.md WP-AR1)", () => {
     }
   });
 
-  test("AC-R69: rl-main and rl-reviewer hold the finder lines once, at the place of CALLERS_LINES, and stacked right after them", () => {
+  test("AC-R69: rl-main and rl-reviewer hold the finder lines once, right before the do-not-flag list", () => {
     // The Explain profile runs explainAgent as rl-main, which gets no finder lines.
     const explain = SHIPPED_PROFILES.find((p) => p.explain) as Shipped;
     expect(mainAgent(withV(explain, "architecture")).prompt).toBe(mainAgent(explain).prompt);
@@ -59,8 +58,6 @@ describe("variant architecture (architecture-bugs.md WP-AR1)", () => {
       for (const c of [NO_CONTEXT, GOAL]) {
         const base = finders(p, c);
         const arch = finders(withV(p, "architecture"), c);
-        const call = finders(withV(p, "callers"), c);
-        const both = finders(withV(p, "callers", "architecture"), c);
         for (let i = 0; i < base.length; i++) {
           const a = lines(arch[i]?.prompt ?? "");
           const k = at(a, ARCHITECTURE_LINES);
@@ -68,13 +65,8 @@ describe("variant architecture (architecture-bugs.md WP-AR1)", () => {
           for (const x of ARCHITECTURE_LINES) expect(a.filter((y) => y === x)).toHaveLength(1);
           // Only the block differs from the default prompt.
           expect([...a.slice(0, k), ...a.slice(k + ARCHITECTURE_LINES.length)]).toEqual(lines(base[i]?.prompt ?? ""));
-          const cl = lines(call[i]?.prompt ?? "");
-          expect(a[k - 1]).toBe(cl[at(cl, CALLERS_LINES) - 1]);
-          const b = lines(both[i]?.prompt ?? "");
-          const j = at(b, CALLERS_LINES);
-          expect(j).toBeGreaterThan(-1);
-          expect(at(b, ARCHITECTURE_LINES)).toBe(j + CALLERS_LINES.length);
-          for (const x of ARCHITECTURE_VERIFY) expect(b).not.toContain(x);
+          expect(a[k + ARCHITECTURE_LINES.length]).toStartWith("Do not report the points below.");
+          for (const x of ARCHITECTURE_VERIFY) expect(a).not.toContain(x);
         }
       }
   });
@@ -102,7 +94,7 @@ describe("variant architecture (architecture-bugs.md WP-AR1)", () => {
       expect(salvageAgent(withV(p, "architecture")).prompt).toBe(salvageAgent(p).prompt);
     }
     expect(promptVersion(withV(general, "architecture"))).toBe(`${REVIEW_PROMPT_VERSION}+architecture`);
-    expect(promptVersion(withV(general, "callers", "architecture"))).toBe(`${REVIEW_PROMPT_VERSION}+architecture+callers`);
+    expect(promptVersion(withV(general, "handoff", "architecture"))).toBe(`${REVIEW_PROMPT_VERSION}+architecture+handoff`);
   });
 
   test("AC-R72: each sentence of the lines has at most 20 words, with no CRITICAL, MUST, or IMPORTANT", () => {

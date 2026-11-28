@@ -232,11 +232,16 @@ describe("skill prompts and profiles", () => {
         "security2",
         "security2-verify",
         "refute-issue",
+        "handoff",
+        "classes",
+        "parts",
+        "minor-fold",
+        "codegraph",
       ],
     };
     json(join(dir, "config.json"), { baseUrl: "https://example.test", userSlug: "me", notifications: false, profiles: [stored] });
     const read = readConfig(dir)?.profiles?.find((p) => p.id === general.id);
-    expect(read).toEqual({ ...general, variants: ["callers"] });
+    expect(read).toEqual({ ...general, variants: ["handoff"] });
   });
 
   test("the profile schema dedupes skills and refuses bad IDs", () => {

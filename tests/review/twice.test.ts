@@ -180,7 +180,7 @@ describe("twice (catalog)", () => {
     expect(twice({ variants: ["twice"] })).toBe(true);
     expect(twice({ variants: [] })).toBe(false);
     expect(twice({ variants: ["lenses3", "twice"] })).toBe(false);
-    expect(twice({ variants: ["twice", "callers"] })).toBe(true);
+    expect(twice({ variants: ["twice", "handoff"] })).toBe(true);
   });
 });
 

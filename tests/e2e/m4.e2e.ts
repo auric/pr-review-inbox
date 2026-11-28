@@ -746,6 +746,36 @@ test("Git history: off by default, saved at once as the variant, and still on af
   await expect.poll(async () => (await settingsApi(request)).profiles[0]?.variants ?? []).toEqual([]);
 });
 
+// The closed "Experimental" fold of each profile (src/web/settings/profiles.ts EXPERIMENTAL).
+test("Experimental: the fold starts closed, a switch saves its variant at once, and it is still on after a reload", async ({
+  page,
+  request,
+}) => {
+  await connect(page);
+  await openSettings(page);
+  const fold = page.locator("#profile-0-experimental");
+  await expect(fold).not.toHaveAttribute("open");
+  await expect(page.locator("#profile-0-handoff")).toBeHidden();
+  await fold.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(fold).toHaveAttribute("open");
+  const handoff = field(page, "Helper handoff", 1);
+  await expect(handoff).not.toBeChecked();
+  await expect(page.locator("#profile-0-handoff-help")).toHaveText(
+    "Helper agents report their open questions and risks to the main run. Not measured.",
+  );
+  await handoff.check();
+  await saved(page);
+  await expect.poll(async () => (await settingsApi(request)).profiles[0]?.variants).toEqual(["handoff"]);
+  await expect(fold.locator("summary")).toContainText("Experimental (1 on)");
+  await reloadSettings(page);
+  await page.locator("#profile-0-experimental summary").click();
+  await expect(field(page, "Helper handoff", 1)).toBeChecked();
+  await field(page, "Helper handoff", 1).uncheck();
+  await saved(page);
+  await expect.poll(async () => (await settingsApi(request)).profiles[0]?.variants ?? []).toEqual([]);
+});
+
 test("Edit <profile> in the brief opens the settings at the checked profile, through the profile URL", async ({ page }) => {
   await connect(page);
   await page.keyboard.press("Shift+R");

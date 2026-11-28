@@ -7,8 +7,6 @@ import {
   AGENT_PARAMS_RULE,
   ANSWERED_RULES,
   askAgent,
-  CALLERS_LINES,
-  CLASSES_LINES,
   contextBlock,
   DISCUSS_RULES,
   DO_NOT_FLAG,
@@ -22,20 +20,14 @@ import {
   LARGE_FILE_RULE,
   MODULES,
   mainAgent,
-  minorFold,
   moduleNotes,
   moduleSections,
   NO_CONTEXT,
   NOTES_RULES,
-  PART_REVIEWER,
-  POLISH_LINES,
-  POLISH_REVIEWER,
-  POLISH_VERIFY,
   PR_CONTEXT_RULES,
   PREEXISTING_LINES,
   PREEXISTING_REVIEWER,
   PREEXISTING_VERIFY,
-  partLines,
   profileRevision,
   promptVersion,
   RETIRED_PROFILES,
@@ -85,7 +77,7 @@ import {
   type PromptInput,
 } from "../../src/server/review/prompt";
 import { SESSION_FIX_RULES } from "../../src/shared/consult";
-import { MODULE_IDS, type ModuleId, type ProfileInput, profileInput, TRIAL_MODULES, VARIANTS, VOLUMES } from "../../src/shared/dto";
+import { MODULE_IDS, type ModuleId, type ProfileInput, profileInput, VARIANTS, VOLUMES } from "../../src/shared/dto";
 import {
   FIX_WHY_RULES,
   fixJsonSchema,
@@ -555,8 +547,7 @@ describe("review v2 finder prompt", () => {
     // Update the hashes and raise the version together. Stats and the eval compare runs by prompt version.
     // WP-PN: every review run but Explain has ./context/pr-context.md, so the hashes cover the PR context rules.
     const run = { ...FULL, prContext: true, notes: true };
-    // docs/plans/review-v3.md WP-V2: a trial module is an eval switch, so it stays out of the hash.
-    const known = { ...allModules, modules: allModules.modules.filter((m) => !TRIAL_MODULES.includes(m)) };
+    const known = allModules;
     const finder = [mainAgent(known, run), reviewerAgent(known, run), withDelegation(mainAgent(general), "always")]
       .map((a) => a.prompt)
       .join("\n---\n");
@@ -788,41 +779,6 @@ describe("review v3 prompt switches", () => {
       improve: "fd460dfd08351728607a4ede6b5e26fee7a31e5f5368168ee5cceed37508ad44",
     });
     expect(SHIPPED_PROFILES.map((p) => p.variants)).toEqual([[], []]);
-    for (const p of SHIPPED_PROFILES) for (const m of TRIAL_MODULES) expect(p.modules).not.toContain(m);
-  });
-
-  test("parts (WP-V14): part files replace the auto lines and add one rl-reviewer line; the variant alone changes no prompt", () => {
-    const main = mainAgent(general, FULL);
-    const parted = withDelegation(main, "auto", 6).prompt;
-    expect(parted).toBe([main.prompt, AGENT_PARAMS_RULE, ...partLines(6)].join("\n"));
-    expect(parted).toContain("\nThe app split the change into 6 parts in ./context/parts/. Make one rl-reviewer call per part.\n");
-    expect(parted).not.toContain("The change is large.");
-    expect(parted.endsWith('set agent to "rl-reviewer" on each.')).toBe(true);
-    expect(withDelegation(main, "auto", 1).prompt).toContain("into 1 part in ./context/parts/.");
-    // Mode always, no delegation, and no part files keep their lines.
-    expect(withDelegation(main, "always", 6)).toEqual(withDelegation(main, "always"));
-    expect(withDelegation(main, null, 6)).toEqual(main);
-    expect(withDelegation(main, "auto", 0).prompt).toContain("\nThe change is large. Give parts of it to the rl-reviewer agent.");
-    expect(reviewerAgent(general, FULL, true).prompt).toBe(`${reviewerAgent(general, FULL).prompt}\n${PART_REVIEWER}`);
-    // jobs.ts passes the part count only for the variant with delegation auto (parts.ts partsOf).
-    const p = withVariants("parts");
-    expect(mainAgent(p, FULL)).toEqual(main);
-    expect(reviewerAgent(p, FULL)).toEqual(reviewerAgent(general, FULL));
-    expect(buildPrompt({ ...full, profile: p })).toBe(buildPrompt(full));
-    expect(buildRereviewPrompt({ ...rereviewInput, profile: p })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(promptVersion(p)).toBe(`${REVIEW_PROMPT_VERSION}+parts`);
-  });
-
-  test("the failures module is a trial module with its own section, an ordered checklist with a trigger rule", () => {
-    expect(TRIAL_MODULES).toEqual(["failures"]);
-    expect(MODULES.failures.label).toBe("Failure paths");
-    const p = { ...general, modules: [...general.modules, "failures" as const] };
-    const section = ["Check section failures:", ...MODULES.failures.lines.map((l) => `- ${l}`)].join("\n");
-    const shipped = moduleSections(general, FULL).join("\n");
-    expect(mainAgent(p, FULL).prompt).toBe(mainAgent(general, FULL).prompt.replace(shipped, `${shipped}\n${section}`));
-    expect(MODULES.failures.lines.at(-1)).toBe(
-      "Report a row only when the code does not handle it, and give its trigger. A handled row gives no finding.",
-    );
   });
 
   test("the finder language lines keep their bytes", () => {
@@ -843,28 +799,6 @@ describe("review v3 prompt switches", () => {
       ),
     );
     expect(withVerifyDelegation(main, false, true, true)).toEqual(main);
-  });
-
-  // docs/plans/review-v2/review-quality-2026.md item 7.
-  test("classes: the finder agents get the bug kinds after the profile prompt, and nothing else changes", () => {
-    const k = withVariants("classes");
-    const after = `${general.prompt}\n${CLASSES_LINES.join("\n")}`;
-    for (const c of [FULL, RE, NO_CONTEXT]) {
-      expect(mainAgent(k, c).prompt).toBe(mainAgent(general, c).prompt.replace(general.prompt, after));
-      expect(reviewerAgent(k, c).prompt).toBe(reviewerAgent(general, c).prompt.replace(general.prompt, after));
-      expect(reviewerAgent(k, c, true).prompt).toBe(reviewerAgent(general, c, true).prompt.replace(general.prompt, after));
-    }
-    expect(CLASSES_LINES.at(-1)).toBe("Report other problems too.");
-    // The verify phase, the shared rules, every stdin, and the other run kinds do not change.
-    for (const agent of [verifyAgent, verifierAgent]) expect(agent(k, FULL, true).prompt).toBe(agent(general, FULL, true).prompt);
-    expect(sharedRules(k)).toEqual(sharedRules(general));
-    expect(buildPrompt({ ...full, profile: k })).toBe(buildPrompt(full));
-    expect(buildRereviewPrompt({ ...rereviewInput, profile: k })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(buildVerifyPrompt({ ...full, profile: k, count: 3, rereview: false })).toBe(
-      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
-    );
-    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(k, FULL).prompt).toBe(kind(general, FULL).prompt);
-    expect(promptVersion(k)).toBe(`${REVIEW_PROMPT_VERSION}+classes`);
   });
 
   // docs/plans/review-v3.md WP-V6, D1, and Q6.
@@ -906,121 +840,26 @@ describe("review v3 prompt switches", () => {
     });
     type Node = { type?: string; required?: string[]; properties?: Record<string, Node>; items?: Node };
     const item = (s: Record<string, unknown>) => (s as Node).properties?.findings?.items as Node;
-    for (const s of [
-      reviewJsonSchema(),
-      reviewJsonSchema(true),
-      rereviewJsonSchema(),
-      reviewJsonSchema(false, true),
-      rereviewJsonSchema(true),
-    ]) {
+    for (const s of [reviewJsonSchema(), reviewJsonSchema(true), rereviewJsonSchema()]) {
+      expect(Object.keys(item(s).properties ?? {})).not.toContain("polish");
       expect(item(s).required).toContain("preexisting");
       expect(item(s).properties?.preexisting?.type).toBe("boolean");
     }
   });
 
-  // docs/plans/review-v3.md D2 and docs/plans/review-v2/research/review-practice-2026-11.md T6.
-  test("callers: rl-main and rl-reviewer get the caller lines after the finder rules; salvage and the verify phase do not", () => {
-    const k = withVariants("callers");
-    const dnf = "Do not report the points below. The check step refutes them, so they only cost time:";
-    const plus = (s: string) => s.replace(dnf, `${CALLERS_LINES.join("\n")}\n${dnf}`);
-    for (const c of [FULL, RE, NO_CONTEXT]) {
-      expect(mainAgent(k, c).prompt).toBe(plus(mainAgent(general, c).prompt));
-      expect(reviewerAgent(k, c).prompt).toBe(plus(reviewerAgent(general, c).prompt));
-      expect(reviewerAgent(k, c, true).prompt).toBe(plus(reviewerAgent(general, c, true).prompt));
-    }
-    // With the verify phase off, the lines still follow the finder rules.
-    const off = { ...general, verifier: { ...general.verifier, mode: "off" as const } };
-    const offDnf = "Do not report the points below. They only cost the user time:";
-    expect(mainAgent({ ...off, variants: k.variants }, FULL).prompt).toBe(
-      mainAgent(off, FULL).prompt.replace(offDnf, `${CALLERS_LINES.join("\n")}\n${offDnf}`),
-    );
-    expect(CALLERS_LINES.join(" ")).toContain("Find them with the codegraph tools when the run has them. Else use Grep and Read.");
-    expect(CALLERS_LINES.at(-1)).toBe("When one breaks, report it. In evidence, give the path:line of that caller or consumer.");
-    expect(salvageAgent(k)).toEqual(salvageAgent(general));
-    for (const agent of [verifyAgent, verifierAgent]) expect(agent(k, FULL, true).prompt).toBe(agent(general, FULL, true).prompt);
-    expect(buildPrompt({ ...full, profile: k })).toBe(buildPrompt(full));
-    expect(buildRereviewPrompt({ ...rereviewInput, profile: k })).toBe(buildRereviewPrompt(rereviewInput));
-    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(k, FULL).prompt).toBe(kind(general, FULL).prompt);
-    expect(promptVersion(k)).toBe(`${REVIEW_PROMPT_VERSION}+callers`);
-  });
-
-  // docs/plans/review-v2/minor-fold.md sections 4 and 5 (AC-R60, AC-R63). The polish lines follow the pre-existing lines.
-  const PRE_LAST = PREEXISTING_LINES.at(-1) ?? "";
-  const PRE_VERIFY_LAST = PREEXISTING_VERIFY.at(-1) ?? "";
-  const withPolish = (s: string) => s.replace(`\n${PRE_LAST}\n`, `\n${PRE_LAST}\n${POLISH_LINES.join("\n")}\n`);
-  test("minor-fold: rl-main, rl-reviewer, and salvage get the polish lines after the pre-existing lines; the verify phase gets its lines", () => {
-    const m = withVariants("minor-fold");
-    expect(minorFold(m)).toBe(true);
-    expect(minorFold(general)).toBe(false);
-    for (const c of [FULL, RE, NO_CONTEXT]) {
-      expect(mainAgent(m, c).prompt).toBe(withPolish(mainAgent(general, c).prompt));
-      expect(reviewerAgent(m, c).prompt).toBe(
-        withPolish(reviewerAgent(general, c).prompt).replace(PREEXISTING_REVIEWER, `${PREEXISTING_REVIEWER}\n${POLISH_REVIEWER}`),
-      );
-    }
-    expect(salvageAgent(m).prompt).toBe(withPolish(salvageAgent(general).prompt));
-    expect(POLISH_LINES.join(" ")).toContain("Report at most 3 polish points.");
-    for (const agent of [verifyAgent, verifierAgent])
-      for (const q of [false, true])
-        expect(agent(m, FULL, q).prompt).toBe(
-          agent(general, FULL, q).prompt.replace(PRE_VERIFY_LAST, `${PRE_VERIFY_LAST}\n${POLISH_VERIFY.join("\n")}`),
-        );
-    expect(buildPrompt({ ...full, profile: m })).toBe(buildPrompt(full));
-    expect(buildRereviewPrompt({ ...rereviewInput, profile: m })).toBe(buildRereviewPrompt(rereviewInput));
-    expect(buildVerifyPrompt({ ...full, profile: m, count: 3, rereview: false })).toBe(
-      buildVerifyPrompt({ ...full, count: 3, rereview: false }),
-    );
-    for (const kind of [askAgent, replyAgent, fixAgent, discussAgent]) expect(kind(m, FULL).prompt).toBe(kind(general, FULL).prompt);
-    expect(promptVersion(m)).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold`);
-  });
-
-  test("minor-fold: the CLI schemas ask for polish only under the variant", () => {
-    type Node = { type?: string; required?: string[]; properties?: Record<string, Node>; items?: Node };
-    const item = (s: Record<string, unknown>) => (s as Node).properties?.findings?.items as Node;
-    for (const s of [reviewJsonSchema(false, true), reviewJsonSchema(true, true), rereviewJsonSchema(true)]) {
-      expect(item(s).required).toContain("polish");
-      expect(item(s).properties?.polish?.type).toBe("boolean");
-    }
-    for (const s of [reviewJsonSchema(), reviewJsonSchema(true), rereviewJsonSchema()])
-      expect(Object.keys(item(s).properties ?? {})).not.toContain("polish");
-    // Both marks: both keys, preexisting first.
-    const keys = Object.keys(item(reviewJsonSchema(false, true)).properties ?? {});
-    expect(keys.slice(-2)).toEqual(["preexisting", "polish"]);
-  });
-
   test("ASD-STE100: every switch line has at most 20 words", () => {
-    expect(
-      longSentences([
-        ...MODULES.failures.lines,
-        ...partLines(6),
-        PART_REVIEWER,
-        VERIFY_GROUP,
-        ...CLASSES_LINES,
-        ...PREEXISTING_LINES,
-        PREEXISTING_REVIEWER,
-        ...PREEXISTING_VERIFY,
-        ...CALLERS_LINES,
-        ...POLISH_LINES,
-        POLISH_REVIEWER,
-        ...POLISH_VERIFY,
-      ]),
-    ).toEqual([]);
+    expect(longSentences([VERIFY_GROUP, ...PREEXISTING_LINES, PREEXISTING_REVIEWER, ...PREEXISTING_VERIFY])).toEqual([]);
   });
 
   test("the prompt version gets the sorted variants; profileRevision and the parse keep old profiles as they were", () => {
     expect(promptVersion(general)).toBe(REVIEW_PROMPT_VERSION);
-    expect(promptVersion(withVariants("callers", "architecture"))).toBe("2.9+architecture+callers");
+    expect(promptVersion(withVariants("handoff", "architecture"))).toBe("2.9+architecture+handoff");
     expect(VARIANTS).toEqual([
       "architecture",
-      "callers",
-      "classes",
-      "codegraph",
       "git-history",
       "handoff",
       "lenses3",
-      "minor-fold",
       "obligations",
-      "parts",
       "stack",
       "style55",
       "submodules",
@@ -1034,20 +873,19 @@ describe("review v3 prompt switches", () => {
     const retired = ["signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check"];
     // Removed 2026-11-27 after their gates failed. A stored profile with one of them still loads.
     retired.push("broad", "verify2", "security2", "security2-verify", "refute-issue", "runs3");
-    expect(profileInput.parse({ ...old, variants: ["callers", ...retired, "bogus", 7, "architecture", "callers"] }).variants).toEqual([
-      "architecture",
-      "callers",
-    ]);
+    // Removed 2026-11-28 (docs/plans/review-v2/review-ledger.md).
+    retired.push("callers", "classes", "parts", "minor-fold", "codegraph");
+    expect(
+      profileInput.parse({ ...old, variants: ["handoff", ...retired.slice(-5), "bogus", 7, "architecture", "handoff"] }).variants,
+    ).toEqual(["architecture", "handoff"]);
+    // The retired trial module drops like any unknown module.
+    expect(profileInput.parse({ ...old, modules: ["failures", "security"] }).modules).toEqual(["security"]);
     expect(profileInput.parse({ ...old, variants: ["verify2"] }).variants).toEqual([]);
     expect(profileInput.parse({ ...old, variants: retired }).variants).toEqual([]);
     const revisions = [
       general,
-      withVariants("classes"),
-      withVariants("callers"),
-      withVariants("minor-fold"),
       withVariants("architecture"),
       withVariants("lenses3"),
-      withVariants("codegraph"),
       withVariants("handoff"),
       withVariants("git-history"),
     ].map(profileRevision);
@@ -1076,7 +914,7 @@ describe("the Agent parameter rule", () => {
     for (const p of [
       withDelegation(main, "always").prompt,
       withDelegation(main, "auto").prompt,
-      withDelegation(main, "auto", 3).prompt,
+      withDelegation(main, "auto", true).prompt,
       withVerifyDelegation(verifyAgent(general), true, true).prompt,
       withExplorer(main).prompt,
     ])

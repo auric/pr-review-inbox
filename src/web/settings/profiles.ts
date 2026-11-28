@@ -74,7 +74,8 @@ export type Draft = {
   volume: ProfileInput["volume"];
   // outcome: what a refuted finding does (spec.md section 1.8).
   verifier: { mode: ProfileInput["verifier"]["mode"]; model: string; effort: Effort | ""; outcome: VerifierOutcome };
-  // docs/plans/review-v3.md WP-V2: eval switches. The editor has controls for "stack", "submodules", "twice", and "git-history" only. A save keeps the others.
+  // docs/plans/review-v3.md WP-V2: opt-in variants. The editor has switches for "stack", "submodules", "twice", "git-history", and the
+  // EXPERIMENTAL variants. A save keeps the others ("style55").
   variants: ProfileInput["variants"];
 };
 
@@ -305,6 +306,22 @@ export type Change =
 export const withVariant = (list: readonly Variant[], v: Variant, on: boolean): Variant[] =>
   VARIANTS.filter((x) => (x === v ? on : list.includes(x)));
 
+// The switches of the closed "Experimental" fold of each profile: variant, label, help. None has a proven gain on current prompts.
+export const EXPERIMENTAL: readonly (readonly [Extract<Variant, Part>, string, string])[] = [
+  [
+    "lenses3",
+    "Three focused passes",
+    "Three passes, each with a different focus, then one merged list. About 5 times the usage. More findings, but no proven gain.",
+  ],
+  ["handoff", "Helper handoff", "Helper agents report their open questions and risks to the main run. Not measured."],
+  ["architecture", "Design rules", "Adds rules for design problems. Not measured alone."],
+  [
+    "obligations",
+    "Companion edits and criteria",
+    "Checks companion edits and the task's acceptance criteria. Not measured on current prompts.",
+  ],
+];
+
 // The fields of a shipped profile that the editor can change and reset, in form order. variants has no reset: no shipped profile has one.
 export const SHIPPED_FIELDS = [
   ["name", "Name"],
@@ -472,6 +489,11 @@ export type Part =
   | "submodules"
   | "twice"
   | "history"
+  | "experimental"
+  | "lenses3"
+  | "handoff"
+  | "architecture"
+  | "obligations"
   | "model"
   | "model-id"
   | "effort"

@@ -49,7 +49,6 @@ import {
   type NoteProposal,
   neverHidden,
   type Obligation,
-  POLISH_MAX,
   PREEXISTING_MAX,
   type Question,
   type ReplyPayload,
@@ -66,8 +65,8 @@ import {
   type VerifyVerdictName,
   verifyResult,
 } from "../../shared/review";
-import type { RunErrorKind, RunEvent, RunStatus } from "../../shared/run-log";
-import { type Lens, minorFold, type Profile, passLabel } from "./catalog";
+import { eventPhase, type RunErrorKind, type RunEvent, type RunStatus } from "../../shared/run-log";
+import { GIT_SERVER, type Lens, type Profile, passLabel } from "./catalog";
 import type { RunOutcome } from "./claude";
 import type { Candidate } from "./context-files";
 import { type DiffFile, parseDiff } from "./diffmap";
@@ -224,6 +223,38 @@ export function unreadAlways(o: RunOutcome, always: { id: string; folder: string
     .map((s) => `Skill ${s.id} (always use): the model did not read SKILL.md.`);
 }
 
+// The rl-git tools whose path argument shows the file or its changes (git-mcp.ts). git_log with a path shows commit subjects only.
+const GIT_PATH_TOOLS = ["git_diff", "git_blame", "git_show"].map((t) => `mcp__${GIT_SERVER}__${t}`);
+const REPO_DIR = "repo/";
+// docs/plans/review-v3.md WP-V13: the repository paths that an agent of the find phase opened, by any agent. stream.ts targetOf gives
+// a Read target relative to the run folder with "/", and a git tool target as its path argument relative to ./repo, else its JSON
+// input or "". A git_diff without a path opens no single file, so the set is a lower bound.
+export function openedFiles(events: RunEvent[]): Set<string> {
+  const opened = new Set<string>();
+  for (const e of events) {
+    if (e.status !== "ok" || eventPhase(e) !== "find") continue;
+    const target = e.target.replace(/^(\.\/)+/, "");
+    if (e.tool === "Read" && target.startsWith(REPO_DIR)) opened.add(target.slice(REPO_DIR.length));
+    else if (GIT_PATH_TOOLS.includes(e.tool) && target !== "" && !target.startsWith("{")) opened.add(target);
+  }
+  return opened;
+}
+// The number of changed files that no agent opened (openedFiles), by path or old path. A git_diff without a path and without
+// stat_only pages the whole diff, so then no file counts as unread. A binary file has no text to read.
+// Limit: git_diff with stat_only and a path counts as a read.
+export function unreadFiles(events: RunEvent[], files: DiffFile[]): number {
+  const fullDiff = events.some(
+    (e) =>
+      e.status === "ok" &&
+      eventPhase(e) === "find" &&
+      e.tool === GIT_PATH_TOOLS[0] &&
+      (e.target === "" || (e.target.startsWith("{") && !e.target.includes('"stat_only":true'))),
+  );
+  if (fullDiff) return 0;
+  const opened = openedFiles(events);
+  return files.filter((f) => !f.binary && ![f.path, f.oldPath].some((p) => p !== null && opened.has(p))).length;
+}
+
 // gaps: the lines that the app added to coverage skipped and unavailable. Only they make the run incomplete. The lines of the model
 // stay in the coverage, but they do not change the status (docs/plans/review-v2/spec.md section 1.9).
 function ended(raw: string, o: RunOutcome, result: NonNullable<Ending["result"]>, gaps: readonly string[]): Ending {
@@ -353,7 +384,6 @@ export async function judge(
       explain: profile.explain,
       rules,
       addedOnly,
-      polish: minorFold(profile),
     });
   let v = check();
   if (v.dropped.some((d) => d.reason === "file" || d.reason === "match")) {
@@ -865,10 +895,6 @@ export function settle(f: Found, s: SettleInput): Ending {
   // a question. A pre-existing finding is never demoted, never asked, and never posted.
   const pres: { item: NewItem; link: CandidateLink; rank: number }[] = [];
   let low = 0;
-  // docs/plans/review-v2/minor-fold.md section 5: the shown new polish points, capped after the loop. asked: those that ended as a
-  // question. Carried polish points are not capped.
-  const polish: { item: NewItem; link: CandidateLink; rank: number }[] = [];
-  let polishAsked = 0;
   for (const c of f.candidates) {
     const v = got.get(c.n);
     if (v) verify[COUNT[v.verdict]]++;
@@ -878,11 +904,6 @@ export function settle(f: Found, s: SettleInput): Ending {
     const link = { n: c.n, duplicateOf: v?.verdict === "duplicate" ? v.duplicateOf : null };
     if (pre && (out.kind === "question" || (out.status === "new" && out.severity !== "blocker" && out.severity !== "major"))) {
       low++;
-      continue;
-    }
-    const pol = c.from === null && c.finding.polish === true;
-    if (pol && out.kind === "question") {
-      polishAsked++;
       continue;
     }
     if (out.kind === "question") {
@@ -912,10 +933,6 @@ export function settle(f: Found, s: SettleInput): Ending {
       pres.push({ item, link, rank: severities.indexOf(out.severity) * confidences.length + confidences.indexOf(c.finding.confidence) });
       continue;
     }
-    if (pol && out.status === "new") {
-      polish.push({ item, link, rank: CHECK_ORDER.indexOf(out.check) * confidences.length + confidences.indexOf(c.finding.confidence) });
-      continue;
-    }
     links.set(item, link);
     items.push(item);
   }
@@ -932,15 +949,6 @@ export function settle(f: Found, s: SettleInput): Ending {
     coverage.notChecked.push(
       `${over} pre-existing ${over === 1 ? "finding was" : "findings were"} left out: a run shows at most ${PREEXISTING_MAX}.`,
     );
-  polish.sort((a, b) => a.rank - b.rank);
-  for (const p of polish.slice(0, POLISH_MAX)) {
-    links.set(p.item, p.link);
-    items.push(p.item);
-  }
-  const polishOver = Math.max(0, polish.length - POLISH_MAX);
-  const points = (n: number) => `${n} polish ${n === 1 ? "point was" : "points were"}`;
-  if (polishAsked) coverage.notChecked.push(`${points(polishAsked)} left out: the check asked a question, or no trigger was named.`);
-  if (polishOver) coverage.notChecked.push(`${points(polishOver)} left out: a run shows at most ${POLISH_MAX}.`);
   // docs/plans/review-v2/review-questions.md: the verdict of each finder question. Question k has number written + k + 1.
   const finderQuestions: FinderQuestions = { asked: f.questions.length, answered: 0, findings: 0, kept: 0, answers: [] };
   const kept: Question[] = [];

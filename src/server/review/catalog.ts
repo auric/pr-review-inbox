@@ -17,7 +17,7 @@ import {
   type Variant,
   type Volume,
 } from "../../shared/dto";
-import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, POLISH_MAX, PREEXISTING_MAX, REVIEW_PROMPT_VERSION } from "../../shared/review";
+import { FIX_EDIT_RULES, FIX_WHY_RULES, MAX_OBLIGATIONS, PREEXISTING_MAX, REVIEW_PROMPT_VERSION } from "../../shared/review";
 import {
   CHECK_TIMEOUT_SEC,
   EXTERNAL_KINDS,
@@ -652,42 +652,6 @@ export const PREEXISTING_VERIFY = [
   "When a pre-existing candidate and another candidate describe one problem, the pre-existing one is the duplicate.",
 ];
 
-// docs/plans/review-v2/minor-fold.md sections 3 and 4: the finder lines of the variant "minor-fold". validate.ts keeps the mark only
-// under the variant, judge.ts settle caps the points at POLISH_MAX, and displayGroup puts them into fold.
-export const minorFold = (p: Partial<Pick<Profile, "variants">>) => has(p, "minor-fold");
-export const POLISH_LINES = [
-  "You can also report polish points. A polish point is no defect, but a reviewer would ask the author to fix it.",
-  'The do-not-flag list and the line "Give no nits" do not apply to polish points.',
-  "Report only these kinds of polish points, and set category to the kind:",
-  "- todo: an added line holds a TODO or FIXME. The line names no ticket and no pull request.",
-  "- stale: a comment next to changed code states something false about the code at the head.",
-  "- naming: a new or changed name states something false about what its code does.",
-  "- naming: a new name breaks the naming pattern of its own file. Give a line of that pattern in evidence.",
-  "- clarity: an added line holds commented-out code or a debug print.",
-  "- clarity: an added line holds a value whose named constant the repository already has. Give that constant in evidence.",
-  "Never report wording, grammar, formatting, or a choice between two good names.",
-  "A defect, or a false doc that users or callers act on, is no polish point. Report it as a finding.",
-  "Anchor a polish point on its line. When that line is unchanged, set cause to the changed line that makes it false.",
-  "Set severity to nit. In trigger, say what a reader gets wrong, or what stays undone.",
-  `Report at most ${POLISH_MAX} polish points. Pick the points that a reviewer would most likely ask to fix.`,
-  "Set polish to true on each polish point. Set polish to false on every other finding.",
-];
-export const POLISH_REVIEWER = "Also report polish for each finding.";
-// The verify lines of the variant. context-files.ts candidatesFile marks a polish candidate.
-export const POLISH_VERIFY = [
-  'A candidate with the line "Polish: yes" is a polish point. Its category names its kind: todo, stale, naming, or clarity.',
-  "For a polish point, check only the claim at its anchor and its cause. Do not look for a trigger.",
-  'The do-not-flag item "style, naming, formatting, or comment wording" does not apply to a polish point.',
-  "Confirm a todo point only when the line is added and names no ticket and no pull request.",
-  "Confirm a stale point only when the comment states something false about the code at the head.",
-  "The change must also touch that code or make the comment false.",
-  "Confirm a naming point only when the name states something false, or the cited pattern holds in its file.",
-  "Confirm a clarity point only when the line is added and holds what the candidate says.",
-  "Refute a polish point about wording, grammar, formatting, or a choice between two good names.",
-  "When a polish point and another candidate describe one problem, the polish point is the duplicate.",
-  "Never give question for a polish point. Set its severity to nit.",
-];
-
 // docs/plans/review-v2/research/opus55-prompting.md sections 7 and 8.1: the variant "style55". B2 puts the pre-existing lines right after
 // the rule that they make an exception to. B1 gives the verify phase a nit line without "Give no nits" (VERIFY_NIT_55).
 export const style55 = (p: Partial<Pick<Profile, "variants">>) => has(p, "style55");
@@ -725,7 +689,6 @@ export function finderRules(p: FinderProfile, main: boolean, files?: RunFiles): 
     "Anchor each finding on the changed line that it is about. For a problem in unchanged code, anchor it there. Set cause to the changed line that makes it reachable or worse.",
     ...(files?.submodules ? SUBMODULE_FINDER : []),
     ...(s55 ? [] : preexisting),
-    ...(minorFold(p) ? POLISH_LINES : []),
     ...PLACE_RULES,
     "In trigger, give a concrete case: the input or state, the path through the code, and the wrong result.",
     ...(main || handoff(p)
@@ -760,21 +723,8 @@ const doNotFlag = (p: FinderProfile) => [
     : "Do not report the points below. They only cost the user time:",
   ...DO_NOT_FLAG_ITEMS,
 ];
-// docs/plans/review-v2/review-quality-2026.md item 7: the finder lines of the "classes" variant. They stay out of REVIEW_LENS, because
-// an edit of REVIEW_LENS changes profileRevision.
-export const CLASSES_LINES = [
-  "Look hardest at the kinds of problems that authors fix most often:",
-  "- a wrong condition, comparison, or loop bound",
-  "- a wrong conversion of a type, a unit, or a format",
-  "- a missing null, empty, or error case",
-  "- an error that the code loses or reports wrong",
-  "- a resource that the code does not release",
-  "- a wrong effect on a caller outside the diff",
-  "Report other problems too.",
-];
-const classes = (p: Profile) => (has(p, "classes") ? CLASSES_LINES : []);
-// docs/plans/review-v3.md D2 and docs/plans/review-v2/research/review-practice-2026-11.md T6: the finder lines of the variant "callers".
-// rl-main and rl-reviewer get them after the finder rules. The salvage run does not, because it looks for no new problems.
+// docs/plans/review-v3.md D2 and docs/plans/review-v2/research/review-practice-2026-11.md T6: the caller lines. Only the lens
+// "contract" of lenses3 holds them, so their text is frozen with LENS_LINES.
 export const CALLERS_LINES = [
   "For each changed function, type, config key, or message format, find its callers and consumers outside the diff.",
   "Look also in tests, scripts, and build files.",
@@ -782,9 +732,8 @@ export const CALLERS_LINES = [
   "Check that each caller and consumer still works with the change.",
   "When one breaks, report it. In evidence, give the path:line of that caller or consumer.",
 ];
-const callers = (p: Profile) => (has(p, "callers") ? CALLERS_LINES : []);
 // docs/plans/review-v2/architecture-bugs.md sections 4.1 and 4.2: the lines of the variant "architecture". rl-main and rl-reviewer get
-// the finder lines after CALLERS_LINES. The salvage run does not. DO_NOT_FLAG stays the same, so the default prompts keep their bytes.
+// the finder lines after the finder rules. The salvage run does not. DO_NOT_FLAG stays the same, so the default prompts keep their bytes.
 export const architecture = (p: Partial<Pick<Profile, "variants">>) => has(p, "architecture");
 export const ARCHITECTURE_LINES = [
   "For each new call, state, or handler in the change, find how the repository does the same thing elsewhere.",
@@ -857,14 +806,9 @@ export const HISTORY_LINES = [
 ];
 
 // The finder variant lines after the finder rules. A line keeps its first copy, so a stacked variant adds no line twice. With lens null,
-// the lines and their order are those of "callers", "architecture", and "git-history".
+// the lines and their order are those of "architecture" and "git-history".
 const focus = (p: Profile, lens: Lens | null) => [
-  ...new Set([
-    ...callers(p),
-    ...(architecture(p) ? ARCHITECTURE_LINES : []),
-    ...(gitHistory(p) ? HISTORY_LINES : []),
-    ...(lens ? LENS_LINES[lens] : []),
-  ]),
+  ...new Set([...(architecture(p) ? ARCHITECTURE_LINES : []), ...(gitHistory(p) ? HISTORY_LINES : []), ...(lens ? LENS_LINES[lens] : [])]),
 ];
 
 // spec.md section 1.4: the nit rule of each volume. The display rule of the volume works at read time.
@@ -966,22 +910,6 @@ export const MODULES: Record<ModuleId, { label: string; lines: string[] }> = {
       "Report a change that the goal does not explain only when it changes behavior for users.",
     ],
   },
-  // docs/plans/review-v3.md WP-V2, idea 4. A trial module (TRIAL_MODULES).
-  failures: {
-    label: "Failure paths",
-    lines: [
-      "Check each changed function against the rows below, in this order.",
-      "Error paths: each error is handled, passed up, or reported. No error is lost.",
-      "Edge values: empty, zero, negative, maximum, null, and missing input.",
-      "Partial failure and retries: a step fails after an earlier step changed state. A retry repeats no side effect.",
-      "Order: the code works when events, callbacks, or messages arrive in another order.",
-      "Timeouts: each wait on the network, a process, or a lock has a limit.",
-      "Leaks: each file, socket, lock, process, and subscription is released on every path, also on the error paths.",
-      "Callers and callees: each caller handles the new errors and values. Each callee gets the input that it expects.",
-      "Visibility: each failure reaches a log, an error, or the user.",
-      "Report a row only when the code does not handle it, and give its trigger. A handled row gives no finding.",
-    ],
-  },
 };
 
 // spec.md section 1.3: rules needs project instructions, and intent needs a goal. Else the section adds nothing.
@@ -1015,15 +943,6 @@ const DELEGATE: Record<"auto" | "always", string[]> = {
   ],
 };
 
-// docs/plans/review-v3.md WP-V14: the variant "parts" with delegation auto. jobs.ts writes ./context/parts/part-N.md. No line names a path.
-export const partLines = (m: number) => [
-  `The app split the change into ${m} part${m === 1 ? "" : "s"} in ./context/parts/. Make one ${REVIEWER} call per part.`,
-  "Name the part file and the git_diff range in each call. In a re-review, also give the merge base. Do not review the files yourself.",
-  `Copy the findings of each call into findings, and set agent to "${REVIEWER}" on each.`,
-];
-export const PART_REVIEWER =
-  "Your request names a part file. Read it first, and review each file in it. Read other files only to check callers and callees.";
-
 // Gate B38: the CLI refuses an Agent call with model or effort (AGENT_PARAM_DENY), and the lead does not retry it. Each lead with the
 // Agent tool gets this line.
 export const AGENT_PARAMS_RULE = "Never pass model or effort on an Agent call. Each agent has its own model and effort.";
@@ -1046,18 +965,12 @@ export const gitToolLines = (rereview: boolean) => [
   "Call git_diff with stat_only to list the changed files of BASE..HEAD. Call git_diff with a path to see the changes of one file.",
 ];
 
-// spec.md section 1.5: the delegation lines come after the language, skill, and MCP lines. parts: the number of part files, 0 for none.
-// more: the profile has the variant "handoff".
-export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null, parts = 0, more = false): AgentSpec =>
+// spec.md section 1.5: the delegation lines come after the language, skill, and MCP lines. more: the profile has the variant "handoff".
+export const withDelegation = (a: AgentSpec, mode: "auto" | "always" | null, more = false): AgentSpec =>
   mode
     ? {
         ...a,
-        prompt: [
-          a.prompt,
-          AGENT_PARAMS_RULE,
-          ...(mode === "auto" && parts > 0 ? partLines(parts) : DELEGATE[mode]),
-          ...(more ? HANDOFF_DELEGATE : []),
-        ].join("\n"),
+        prompt: [a.prompt, AGENT_PARAMS_RULE, ...DELEGATE[mode], ...(more ? HANDOFF_DELEGATE : [])].join("\n"),
       }
     : a;
 
@@ -1132,7 +1045,6 @@ export function mainAgent(p: Profile, c: ReviewContext = NO_CONTEXT, lens: Lens 
     prompt: [
       "You are a read-only code reviewer. You cannot change files, and you post nothing.",
       p.prompt,
-      ...classes(p),
       ...contextBlock(c),
       ...finderRules(p, true, c),
       ...focus(p, lens),
@@ -1566,9 +1478,8 @@ export const withInstructions = (a: AgentSpec, text: string): AgentSpec =>
 export const withSkills = (a: AgentSpec, folders: string[], always: string[] = [], task = false): AgentSpec =>
   folders.length ? { ...a, prompt: [a.prompt, ...skillLines(folders, always, "skills", task)].join("\n") } : a;
 
-// A server of the user's Claude config in a run. remote: the server is reached over the network. app: the app-run CodeGraph server
-// of the variant "codegraph" (docs/plans/review-v3.md WP-V5).
-export type McpUse = { server: string; tools: string[]; remote: boolean; app?: true };
+// A server of the user's Claude config in a run. remote: the server is reached over the network.
+export type McpUse = { server: string; tools: string[]; remote: boolean };
 
 export const REMOTE_RULE = "Never put code, file contents, paths, or company or product names into a query to a remote server.";
 
@@ -1586,24 +1497,17 @@ export const ISSUE_REMOTE_RULE = "The one exception is a task key of this change
 
 // issues: the run is a review, an explain run, a verify phase, or a salvage run (ISSUE_LINES). "files": rl-reviewer under "handoff".
 export function mcpLines(used: McpUse[], issues: boolean | "files" = false): string[] {
-  const mine = used.filter((u) => !u.app);
-  const app = used.filter((u) => u.app).flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`));
-  const remote = mine.filter((u) => u.remote).map((u) => u.server);
+  const remote = used.filter((u) => u.remote).map((u) => u.server);
   return [
-    ...(mine.length
-      ? [`The user added these MCP tools: ${mine.flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`)).join(", ")}.`]
+    ...(used.length
+      ? [`The user added these MCP tools: ${used.flatMap((u) => u.tools.map((t) => `mcp__${u.server}__${t}`)).join(", ")}.`]
       : []),
     ...(remote.length
       ? [`These MCP servers are remote: ${remote.join(", ")}. ${REMOTE_RULE}${issues ? ` ${ISSUE_REMOTE_RULE}` : ""}`]
       : []),
-    ...(mine.length && issues ? ISSUE_LINES.map((l, i) => (issues === "files" && i === 1 ? ISSUE_FILES_LINE : l)) : []),
-    ...(app.length ? [codegraphLine(app)] : []),
+    ...(used.length && issues ? ISSUE_LINES.map((l, i) => (issues === "files" && i === 1 ? ISSUE_FILES_LINE : l)) : []),
   ];
 }
-
-// docs/plans/review-v3.md WP-V5: the context line of the app-run CodeGraph server. tools: the full tool names.
-export const codegraphLine = (tools: string[]) =>
-  `The app indexed ./repo for these CodeGraph tools: ${tools.join(", ")}. Use them to find the callers and dependents of each changed symbol.`;
 
 // Adds the user MCP tools to the prompt of an agent.
 export const withMcp = (a: AgentSpec, used: McpUse[], issues: boolean | "files" = false): AgentSpec =>
@@ -1612,8 +1516,8 @@ export const withMcp = (a: AgentSpec, used: McpUse[], issues: boolean | "files" 
 // model and effort are agent definition fields (code.claude.com/docs/en/sub-agents). Gate B13 (2.1.301): the CLI accepts both, and
 // it refuses the whole --agents file for an unknown effort. prepare in claude.ts checks each effort first.
 // spec.md section 1.5: the rl-reviewer prompt. The caller adds languages, skills, MCP tools, and the project instructions.
-// parts: the run has part files (withDelegation). lens: see mainAgent.
-export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts = false, lens: Lens | null = null): AgentSpec {
+// lens: see mainAgent.
+export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, lens: Lens | null = null): AgentSpec {
   return {
     ...(p.reviewer.model !== null && { model: p.reviewer.model }),
     ...(p.reviewer.effort !== null && { effort: p.reviewer.effort }),
@@ -1621,7 +1525,6 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
     prompt: [
       "You review one part of a change, read-only. The request names the paths and the git_diff range to review.",
       p.prompt,
-      ...classes(p),
       ...contextBlock(c),
       ...(handoff(p) ? gitToolLines(c.rereview) : []),
       ...finderRules(p, false, c),
@@ -1633,8 +1536,6 @@ export function reviewerAgent(p: Profile, c: ReviewContext = NO_CONTEXT, parts =
       "Report each finding with its place: path, side, line, lineEnd, anchorText, and cause.",
       "Also report title, trigger, severity, category, module, rule, body, evidence, evidenceStatus, and confidence.",
       PREEXISTING_REVIEWER,
-      ...(minorFold(p) ? [POLISH_REVIEWER] : []),
-      ...(parts ? [PART_REVIEWER] : []),
       ...(handoff(p) ? HANDOFF_REVIEWER : []),
     ].join("\n"),
   };
@@ -1768,7 +1669,6 @@ export function verifyRules(p: FinderProfile & Pick<Profile, "modules">, c: Revi
     ...PREEXISTING_VERIFY,
     // focused-passes.md section 4.5: the L2 pass of lenses3 holds ARCHITECTURE_LINES.
     ...(architecture(p) || has(p, "lenses3") ? ARCHITECTURE_VERIFY : []),
-    ...(minorFold(p) ? POLISH_VERIFY : []),
     "Set severity by the rubric below. Lower it for a rare trigger or a small impact.",
     "Raise it only when the code shows a worse result than the candidate says.",
     ...rubric(p).map((l) => (style55(p) && l.startsWith("nit: ") ? VERIFY_NIT_55 : l)),

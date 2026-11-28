@@ -112,8 +112,6 @@ export function candidatesFile(
       ...(c && cause ? [`- Cause: ${cause} (${c.side} side).`] : []),
       // docs/plans/review-v3.md WP-V6: validate.ts keeps the mark only on a blocker or major finding outside the change.
       ...(f.preexisting ? ["- Pre-existing: yes."] : []),
-      // docs/plans/review-v2/minor-fold.md: validate.ts keeps the mark only under the variant "minor-fold".
-      ...(f.polish ? ["- Polish: yes."] : []),
       `- Severity: ${f.severity}. Confidence: ${f.confidence}. Evidence status: ${f.evidenceStatus}. Module: ${oneLine(f.module ?? "core")}. Category: ${oneLine(f.category)}.`,
       "- Title:",
       text(f.title),

@@ -6,7 +6,7 @@
 // from the stored brief to stored drafts, edits, answers, or a walkthrough. One run at a time.
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { consultJsonSchema, type SessionAnswerDto, sessionMaxTurns, sessionTokens } from "../../shared/consult";
 import {
@@ -19,10 +19,8 @@ import {
   type ExplainDto,
   type FixDto,
   type InstructionFileDto,
-  type McpToolDto,
   MOVED_ON,
   type MovedConflict,
-  mcpToolSafety,
   type PrTask,
   type ReviewItemDto,
   type RunConflict,
@@ -95,7 +93,6 @@ import {
   MIN_EDIT_TURNS,
   mainAgent,
   mcpLines,
-  minorFold,
   moduleNotes,
   obligationCheck,
   type Profile,
@@ -134,9 +131,8 @@ import {
   SESSION_GATES,
   sweepCwdFolders,
   type UserMcpEntry,
-  type UserServerSpec,
 } from "./claude";
-import { APP_CODEGRAPH, appCodegraphEntry, codegraphEntry, codegraphIndex, indexCodegraph } from "./codegraph";
+import { codegraphEntry, codegraphIndex, indexCodegraph } from "./codegraph";
 import {
   askConversation,
   candidatesFile,
@@ -190,11 +186,11 @@ import {
   salvageFailed,
   settle,
   unreadAlways,
+  unreadFiles,
   usageOf,
 } from "./judge";
 import { languagesOf, withLanguages } from "./languages";
 import { liveThreads, proposalContext, proposeNotes, storeProposals, suggestionsByItem, within } from "./notes";
-import { partFile, partNotes, partsOf, partText } from "./parts";
 import { loadPrContext } from "./pr-context";
 import {
   buildAskPrompt,
@@ -237,7 +233,7 @@ import {
   submoduleContext,
   submoduleRun,
 } from "./submodules";
-import { claudeJsonPath, listUserTools, McpListError, userServers } from "./user-mcp";
+import { claudeJsonPath, userServers } from "./user-mcp";
 import type { AskedThread } from "./validate";
 import {
   type AttachmentFile,
@@ -272,8 +268,6 @@ const SESSION_TIMEOUT_MS = 20 * 60_000;
 const MAIN_ENTRY = join(import.meta.dir, "..", "main.ts");
 // The skills folder of an implement run, from its cwd. writeContext (src/server/tasks/implement.ts) writes context/ again before each step.
 const IMPLEMENT_SKILLS = "context/skills";
-// docs/plans/review-v3.md WP-V5: the mcp.json key of the app-run CodeGraph server.
-const APP_SERVER = "codegraph";
 type UserStdio = Extract<UserMcpEntry, { type: "stdio" }>;
 // The notification of a review, re-review, or explain run end. One tab claims it (src/web/notify.ts). A cancelled run gives none.
 const RUN_NOTE = "INSERT INTO event (pr, kind, ref, created_at) VALUES ($pr, $kind, $ref, $now) ON CONFLICT DO NOTHING";
@@ -319,8 +313,6 @@ export type ReviewJobsOptions = {
   runnerWrap?: (r: Runner) => Runner;
   // Absent: JIRA_WAIT_MS. The tests pass a shorter wait.
   jiraWaitMs?: number;
-  // The argv prefix of the codegraph executable for the variant "codegraph". Absent: codegraph on PATH. The tests pass the fake.
-  codegraphCommand?: string[];
   // The Bitbucket reads of the variant "submodules" (docs/plans/review-v2/submodule-prs.md section 6). Absent: the forge provider. The
   // eval passes a stub.
   submoduleReader?: SubmoduleReader;
@@ -905,31 +897,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     return failed;
   }
 
-  // docs/plans/review-v3.md WP-V5: the app-run CodeGraph server of the variant "codegraph". The run gets only its read-only tools.
-  // A string is a gap line. null: Cancel came.
-  async function appCodegraph(j: Job, repo: string, ref: { project: string; repo: string }): Promise<UserServerSpec | string | null> {
-    const command = opts.codegraphCommand ?? APP_CODEGRAPH;
-    if (!Bun.which(command[0] as string)) return "CodeGraph: the codegraph executable is not installed";
-    const entry = appCodegraphEntry(command);
-    const failed = await indexRepo(j, entry, repo, ref);
-    if (j.cancelled) return null;
-    if (failed) return `CodeGraph: no index (${failed})`;
-    const pinned = codegraphEntry(entry, repo, APP_SERVER, MAIN_ENTRY);
-    let tools: McpToolDto[];
-    try {
-      tools = await listUserTools(pinned);
-    } catch (e) {
-      return `CodeGraph: unavailable (${e instanceof McpListError ? e.message : "error"})`;
-    }
-    if (j.cancelled) return null;
-    const read = tools.filter((t) => mcpToolSafety(t) === "readOnly").map((t) => t.name);
-    if (!read.length) return "CodeGraph: the server has no read-only tools";
-    return { user: pinned, tools: read, deny: tools.map((t) => t.name).filter((t) => !read.includes(t)) };
-  }
-
   // The docs servers and the user servers of the profile. A picked codegraph server indexes repo first. null: Cancel came.
-  // app: a review run, where the variant "codegraph" adds the app-run server.
-  async function profileServers(j: Job | TaskJob, profile: Profile, repo: string, ref: { project: string; repo: string }, app?: Job) {
+  async function profileServers(j: Job | TaskJob, profile: Profile, repo: string, ref: { project: string; repo: string }) {
     const [docs, user] = await Promise.all([
       docServers(profile),
       userServers(
@@ -951,19 +920,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           user.gaps.push(`MCP server ${key}: no codegraph index (${failed})`);
         } else if (s.user.type === "stdio") user.servers[key] = { ...s, user: codegraphEntry(s.user, repo, key, MAIN_ENTRY) };
     }
-    // A picked codegraph server wins, so one index serves the run.
-    const own =
-      app?.profile.variants.includes("codegraph") && !graphs.length && !user.servers[APP_SERVER]
-        ? await appCodegraph(app, repo, ref)
-        : undefined;
-    if (j.cancelled) return null;
-    if (typeof own === "string") user.gaps.push(own);
     for (const g of user.gaps) log(`Review run ${j.id}: ${g}.`);
     const used: McpUse[] = Object.entries(user.servers).map(([server, s]) => ({ server, tools: s.tools, remote: s.user.type !== "stdio" }));
-    if (own && typeof own !== "string") {
-      user.servers[APP_SERVER] = own;
-      used.push({ server: APP_SERVER, tools: own.tools, remote: false, app: true });
-    }
     if (used.length) log(`Review run ${j.id} MCP servers: ${used.map((u) => `${u.server} (${u.tools.length} tools)`).join(", ")}.`);
     const unmarked = user.unmarked.length ? `Unmarked MCP tools allowed: ${user.unmarked.join(", ")}.` : null;
     if (unmarked) log(`Review run ${j.id}: ${unmarked}`);
@@ -1196,7 +1154,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (j.cancelled) return cancelled();
 
     const profile = j.profile;
-    const tools = await profileServers(j, profile, ws.repo, pr, profile.explain ? undefined : j);
+    const tools = await profileServers(j, profile, ws.repo, pr);
     if (!tools) return cancelled();
     const mcpServers = { [GIT_SERVER]: gitMcpServer(ws, MAIN_ENTRY), ...tools.servers };
     const { used, unmarked } = tools;
@@ -1208,14 +1166,8 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     if (langs.length) log(`Review run ${j.id} language checks: ${langs.join(", ")}.`);
     // docs/plans/review-v2/design.md R8: the app gives the Agent tool by the size of the change, not the model.
     const delegate = j.kind === "review" ? delegation(profile, changed) : null;
-    // docs/plans/review-v3.md WP-V14: paths are PR data, so each part file starts with the UNTRUSTED banner.
-    const parts = delegate ? partsOf(profile, changed) : [];
-    if (parts.length) mkdirSync(join(ws.work, "context", "parts"));
-    for (const [i, p] of parts.entries()) writeFileSync(join(ws.work, partFile(i + 1)), UNTRUSTED + partText(p, i + 1, parts.length));
     if (j.kind === "review" && !profile.explain)
-      log(
-        `Review run ${j.id}: ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate}${parts.length ? `, ${parts.length} parts` : ""})` : "off"}.`,
-      );
+      log(`Review run ${j.id}: ${changed.length} changed files, rl-reviewer ${delegate ? `on (${delegate})` : "off"}.`);
     const context: ReviewContext = {
       taskFile,
       attachments: attachments.length > 0,
@@ -1280,7 +1232,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   earlier: [...earlier, ...carry.posted].map((r) => r.id),
                   posted: carry.posted.map((r) => r.id),
                 }),
-                schema: rereviewJsonSchema(minorFold(profile)),
+                schema: rereviewJsonSchema(),
                 main: mainAgent(profile, context),
               }
             : explain
@@ -1293,7 +1245,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
                   }
                 : {
                     prompt: buildPrompt(input),
-                    schema: reviewJsonSchema(profile.explain, minorFold(profile)),
+                    schema: reviewJsonSchema(profile.explain),
                     main: mainAgent(profile, context),
                   };
     // docs/plans/review-v2/spec.md section 1.9: a review run shows phase finding, then checking.
@@ -1307,7 +1259,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       j.abort = new AbortController();
       try {
         held.twin = await twinWorkspace(ws, String(j.id), dataDir, { signal: j.abort.signal, timeoutMs: RUN_TIMEOUT_MS });
-        const t = await profileServers(j, profile, held.twin.repo, pr, j);
+        const t = await profileServers(j, profile, held.twin.repo, pr);
         if (!t) return cancelled();
         const servers = { [GIT_SERVER]: gitMcpServer(held.twin, MAIN_ENTRY), ...t.servers };
         b = { ws: held.twin, runner: j.twin, mcpServers: servers, used: t.used, gaps: [...t.gaps, ...skills.gaps] };
@@ -1338,7 +1290,6 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
           main: withDelegation(
             withMcp(withSkills(withLanguages(main, langs), folders, always), a.used, finder || explain),
             delegate,
-            parts.length,
             handoff(profile),
           ),
           maxTurns: d
@@ -1380,9 +1331,11 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
     // o: the finder outcome with the events of every pass.
     const notedBy = (o: RunOutcome) => {
       const unread = unreadAlways(o, skills.alwaysCopied);
-      const unparted = partNotes(o.events, parts);
+      // A re-review reads only rangeBase..HEAD, but changed holds the whole change, so it gets no count.
+      const unseen = finder && !carry ? unreadFiles(o.events, changed) : 0;
       return (e: Ending): Ending => {
-        e.result?.summary.coverage.notChecked.push(...texts.lines, ...unread, ...left, ...modules, ...unparted);
+        e.result?.summary.coverage.notChecked.push(...texts.lines, ...unread, ...left, ...modules);
+        if (unseen && e.result) e.result.summary.unreadFiles = unseen;
         if (!unmarked) return e;
         e.result?.summary.coverage.notChecked.push(unmarked);
         return { ...e, raw: `${unmarked}\n\n${e.raw}` };
@@ -1467,7 +1420,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         const prompt = k === 1 ? spec.prompt : buildPrompt({ ...input, questions: false });
         // No await between this check and run(), so a later Cancel reaches the new process.
         if (j.cancelled) return cancel();
-        const ran = await findRun(mainAgent(profile, c, lens), reviewerAgent(profile, c, parts.length > 0, lens), prompt, tag);
+        const ran = await findRun(mainAgent(profile, c, lens), reviewerAgent(profile, c, lens), prompt, tag);
         const o: RunOutcome = { ...ran, events: [mark, ...ran.events.map(tag)] };
         events.push(...o.events.slice(1));
         endedAt = now();
@@ -1556,7 +1509,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         let o: RunOutcome | undefined;
         try {
           j.db.transaction(() => upsertEvents(j.db, j.id, [mark]))();
-          const ran = await findRun(spec.main, reviewerAgent(profile, context, parts.length > 0), spec.prompt, tag, a);
+          const ran = await findRun(spec.main, reviewerAgent(profile, context), spec.prompt, tag, a);
           o = { ...ran, events: [mark, ...ran.events.map(tag)] };
           let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
           if (j.cancelled) return cancelled(o);
@@ -1598,7 +1551,7 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
       if (lost !== null) m.result?.summary.coverage.notChecked.push(`Run 2 of 2 did not start: ${lost}`);
       return m.outcome ? notedBy(m.outcome)(m) : m;
     }
-    const o = await findRun(spec.main, reviewerAgent(profile, context, parts.length > 0), spec.prompt);
+    const o = await findRun(spec.main, reviewerAgent(profile, context), spec.prompt);
     let find: RunPhase = { name: "find", startedAt: findStart, endedAt: now(), usage: usageOf(o) };
     // The runner ignores a cancel that comes after the process ended.
     if (j.cancelled) return cancelled(o);
@@ -2263,11 +2216,10 @@ export function createReviewJobs(opts: ReviewJobsOptions) {
         cwd: ws.work,
         appDir: ws.app,
         prompt: buildPrompt(input),
-        schema: reviewJsonSchema(false, minorFold(profile)),
+        schema: reviewJsonSchema(false),
         main: withDelegation(
           withMcp(withSkills(withLanguages(mainAgent(profile, context), langs), folders, always, true), tools.used, true),
           delegate,
-          0,
           handoff(profile),
         ),
         maxTurns: profile.maxTurns,

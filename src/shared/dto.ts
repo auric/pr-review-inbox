@@ -194,43 +194,22 @@ export type ReviewerSetup = z.infer<typeof reviewerSetup>;
 export const DEFAULT_REVIEWER: ReviewerSetup = { model: null, effort: null, mode: "auto" };
 
 // docs/plans/review-v2/spec.md sections 1.2 to 1.4: the check sections of the finder prompt, the volume, and the verify phase.
-export const MODULE_IDS = [
-  "security",
-  "concurrency",
-  "performance",
-  "tests",
-  "api",
-  "docs",
-  "simplify",
-  "rules",
-  "intent",
-  "failures",
-] as const;
+export const MODULE_IDS = ["security", "concurrency", "performance", "tests", "api", "docs", "simplify", "rules", "intent"] as const;
 export type ModuleId = (typeof MODULE_IDS)[number];
-// docs/plans/review-v3.md V2 and V3: eval switches. Gate U-V1 had no winner, so they stay eval-only. The UI and the Improve prompt do not offer them.
-export const TRIAL_MODULES: readonly ModuleId[] = ["failures"];
-// Opt-in only. The shipped profiles do not have them. "parts": docs/plans/review-v3.md WP-V14. "classes":
-// docs/plans/review-v2/review-quality-2026.md item 7. "obligations":
-// docs/plans/review-v2/obligations.md WP-OB1. "callers": docs/plans/review-v3.md D2, the caller rule. "minor-fold":
-// docs/plans/review-v2/minor-fold.md WP-MF1. "architecture":
-// docs/plans/review-v2/architecture-bugs.md WP-AR1. "lenses3": docs/plans/review-v2/focused-passes.md WP-L1. "codegraph":
-// docs/plans/review-v3.md WP-V5, an app-run CodeGraph server on the snapshot. "stack": docs/plans/review-v2/stacked-prs.md WP-SK1.
-// "submodules": docs/plans/review-v2/submodule-prs.md WP-SM2. "twice": docs/plans/review-v2/thorough-review.md WP-T1a. "handoff":
-// docs/plans/review-v2/delegation-gaps.md section 3 fixes 1, 3, and 4. "git-history": docs/plans/review-v2/git-history.md WP-GH1. "style55":
-// docs/plans/review-v2/research/opus55-prompting.md section 8.1. A retired name ("signal", "order", "rules2", "rereview-strict",
-// "preexisting", "risk-check", "broad", "verify2", "security2", "security2-verify", "refute-issue", "runs3") drops on read. Prompt 2.9 ships "preexisting"
-// and "risk-check" as defaults.
+// Opt-in only. The shipped profiles do not have them. "obligations": docs/plans/review-v2/obligations.md WP-OB1. "architecture":
+// docs/plans/review-v2/architecture-bugs.md WP-AR1. "lenses3": docs/plans/review-v2/focused-passes.md WP-L1. "stack":
+// docs/plans/review-v2/stacked-prs.md WP-SK1. "submodules": docs/plans/review-v2/submodule-prs.md WP-SM2. "twice":
+// docs/plans/review-v2/thorough-review.md WP-T1a. "handoff": docs/plans/review-v2/delegation-gaps.md section 3 fixes 1, 3, and 4.
+// "git-history": docs/plans/review-v2/git-history.md WP-GH1. "style55": docs/plans/review-v2/research/opus55-prompting.md section 8.1.
+// A retired name ("signal", "order", "rules2", "rereview-strict", "preexisting", "risk-check", "broad", "verify2", "security2",
+// "security2-verify", "refute-issue", "runs3", "callers", "classes", "parts", "minor-fold", "codegraph") drops on read. The retired
+// trial module "failures" drops on read too. Prompt 2.9 ships "preexisting" and "risk-check" as defaults.
 export const VARIANTS = [
   "architecture",
-  "callers",
-  "classes",
-  "codegraph",
   "git-history",
   "handoff",
   "lenses3",
-  "minor-fold",
   "obligations",
-  "parts",
   "stack",
   "style55",
   "submodules",
@@ -646,6 +625,9 @@ export type RunSummary = Pick<ValidatedResult, "summary" | "risks" | "coverage" 
   // docs/plans/review-v2/thorough-review.md D3: a run of the variant "twice". copies: the findings that the merge hid as copies.
   // Absent: a one-run review.
   runs?: { count: 2; copies: number };
+  // A full review run: the changed files that no agent read (judge.ts unreadFiles). Absent: none, a re-review, or a run from before
+  // 2026-11-28.
+  unreadFiles?: number;
 };
 // docs/plans/review-v2/review-questions.md: the finder questions of a review run. asked = answered + findings + kept. answered: the
 // check found the answer, which answers holds. findings: the answer showed a defect. Absent in runs before prompt version 2.7.

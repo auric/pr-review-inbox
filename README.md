@@ -101,6 +101,10 @@ The checks add checklists to the review: Security, Threads and races, Performanc
 
 "Git history" is off by default. With it on, a review run reads the commits that wrote the changed lines, and their commit subjects. It reports a change that brings back a problem that an earlier commit fixed. It works best with a Jira MCP server in the profile. Explain does not use it.
 
+"Experimental" at the bottom of each profile is closed by default. Its switches are off by default and have no proven gain. "Three focused passes" runs three passes, each with a different focus, and merges them into one list. It uses about 5 times the Claude usage. "Helper handoff" makes the helper agents report their open questions and risks to the main run. "Design rules" adds rules for design problems. "Companion edits and criteria" checks the edits that must come with the change and the acceptance criteria of the task. The closed fold shows how many switches are on.
+
+When a full review did not open every changed file, its Run setup shows "Coverage: N changed files that no agent read." A binary file does not count. A re-review shows no count. The count costs no Claude usage.
+
 ![Settings, Review profiles: the prompt, the checks, and the volume](docs/screenshots/settings-profiles.webp)
 
 The review brief holds the task, your note, the checks, and the volume: "Only what matters", "Balanced", or "Show everything". A change of a check or of the volume saves to the profile at once. The profile picker shows when you have two or more review profiles. Explain has its own page. A review starts only from the brief.

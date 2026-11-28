@@ -590,6 +590,9 @@ describe("display groups (spec.md section 1.4)", () => {
       expect(["quiet", "balanced", "thorough"].map((v) => displayGroup(x, v as "quiet"))).toEqual([quiet, balanced, thorough]);
     // A run from before review v2 shows every finding that the check did not discard.
     expect(displayGroup(p("nit", "unsure"), undefined)).toBe("main");
+    // A polish point stored before minor-fold was removed (2026-11-28) still goes to the fold at quiet and balanced.
+    const polished = { ...p("minor", "confirmed"), polish: true };
+    expect(["quiet", "balanced", "thorough"].map((v) => displayGroup(polished, v as "quiet"))).toEqual(["fold", "fold", "main"]);
     expect([checkOf(p("major", "confirmed")), checkOf(p("major", "unsure")), checkOf(p("major", "question")), checkOf(p("major"))]).toEqual(
       ["checked", "unsure", "unsure", "unchecked"],
     );

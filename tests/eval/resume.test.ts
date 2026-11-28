@@ -237,6 +237,13 @@ describe("resumeRefusal", () => {
     // A saved result with a variant removed on 2026-11-27 gives a refusal, not a throw.
     const removed = { ...saved(), promptVersion: "2.7+verify2", profile: { ...saved().profile, variants: ["verify2"] } };
     expect(resumeRefusal(removed, now(), ["a", "b"])).toBe(`${it} prompt version 2.7+verify2, but this run has 2.7.`);
+    // The same for the variants removed on 2026-11-28, and for the retired trial module.
+    for (const v of ["callers", "classes", "parts", "minor-fold", "codegraph"]) {
+      const old = { ...saved(), promptVersion: `2.7+${v}`, profile: { ...saved().profile, variants: [v] } };
+      expect(resumeRefusal(old, now(), ["a", "b"])).toBe(`${it} prompt version 2.7+${v}, but this run has 2.7.`);
+    }
+    const trial = { ...saved(), profile: { ...saved().profile, modules: ["failures"] } };
+    expect(() => resumeRefusal(trial, now(), ["a", "b"])).not.toThrow();
     expect(refused({ profileVersion: 10 })).toContain(`${it} profile version 9`);
     expect(refused({ profile: { id: "general", name: "Review", revision: "b".repeat(64) } })).toContain(
       `${it} profile revision aaaaaaaaaaaa`,

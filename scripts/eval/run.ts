@@ -15,7 +15,6 @@ import type { RepoInfo } from "../../src/server/bitbucket/provider";
 import { PROFILES_VERSION, writeConfig } from "../../src/server/config";
 import { createLive } from "../../src/server/live";
 import {
-  GIT_SERVER,
   type ListTools,
   type Profile,
   profileOf,
@@ -33,7 +32,7 @@ import { parseDiff } from "../../src/server/review/diffmap";
 import { git, gitEnv } from "../../src/server/review/git";
 import { saveInstructionSettings } from "../../src/server/review/instructions";
 import { createReviewJobs, type ReviewJobs, type ReviewJobsOptions, type Runner } from "../../src/server/review/jobs";
-import { partsOf, unreadParts } from "../../src/server/review/parts";
+import { openedFiles } from "../../src/server/review/judge";
 import { diffArgs, type GitRemote, syncCache } from "../../src/server/review/workspace";
 import { createSecrets } from "../../src/server/secrets";
 import { createSettings } from "../../src/server/settings";
@@ -241,9 +240,6 @@ export function parseOptions(argv: string[]): Options | { error: string } {
   const variants = v.variants === undefined ? null : v.variants.split(",").map((s) => s.trim());
   if (variants?.some((x) => !(VARIANTS as readonly string[]).includes(x)))
     return { error: `--variants must be a comma list of ${VARIANTS.join(", ")}.` };
-  // docs/plans/review-v3.md WP-V5: without the executable, every run of the variant "codegraph" would be a baseline run.
-  if (v.real && variants?.includes("codegraph") && !Bun.which("codegraph"))
-    return { error: "--variants codegraph needs the codegraph executable on PATH." };
   const rereview = v.rereview ?? false;
   return {
     real: v.real ?? false,
@@ -411,33 +407,16 @@ export async function checkoutState() {
   }
 }
 
-const GIT_PATH_TOOLS = new Set(["git_diff", "git_blame", "git_show"].map((t) => `mcp__${GIT_SERVER}__${t}`));
-const REPO_DIR = "repo/";
-
-// docs/plans/review-v3.md WP-V13: the rl-reviewer calls and the files that the finder opened. stream.ts targetOf gives a Read target
-// relative to the run folder with "/", and a git tool target as its path argument relative to ./repo, else its JSON input or "".
-// A git_diff without a path opens no single file, so opened is a lower bound. The verify phase does not count.
+// docs/plans/review-v3.md WP-V13: the rl-reviewer calls and the files that the finder opened (judge.ts openedFiles). The verify
+// phase does not count.
 export function runFacts(events: RunEvent[]): { agentCalls: number; opened: string[]; toolsPerCall: number } {
   const find = events.filter((e) => eventPhase(e) === "find");
   const calls = find.filter((e) => e.tool === "Agent" && e.agent === REVIEWER);
-  const opened = new Set<string>();
-  for (const e of find) {
-    if (e.status !== "ok") continue;
-    const target = e.target.replace(/^(\.\/)+/, "");
-    if (e.tool === "Read" && target.startsWith(REPO_DIR)) opened.add(target.slice(REPO_DIR.length));
-    else if (GIT_PATH_TOOLS.has(e.tool) && target !== "" && !target.startsWith("{")) opened.add(target);
-  }
   return {
     agentCalls: calls.length,
-    opened: [...opened].sort(),
+    opened: [...openedFiles(find)].sort(),
     toolsPerCall: Math.max(0, ...calls.map((c) => find.filter((e) => e.parent === c.id).length)),
   };
-}
-
-// docs/plans/review-v3.md WP-V14: the part files of the run, and those that an rl-reviewer call of the find phase read.
-export function partFacts(events: RunEvent[], parts: number): { parts: number; partsRead: number } {
-  const find = events.filter((e) => eventPhase(e) === "find");
-  return { parts, partsRead: parts - unreadParts(find, parts).length };
 }
 
 // volume: the volume of the run summary, as the app reads it (stats.ts).
@@ -910,12 +889,6 @@ async function runCase(
         const id = p?.origin === "resolve" ? roots.get(p.thread) : undefined;
         return id === undefined ? [] : [id];
       });
-      // jobs.ts splits the diff of its workspace: the merge base to the head.
-      const profile = profileOf(ctx.profiles, ctx.profile);
-      const changed =
-        profile.variants.includes("parts") && r.mergeBase
-          ? parseDiff(await git(["--git-dir", repo.url, "diff", ...diffArgs, r.mergeBase, head], { env: repo.env }))
-          : [];
       const fq = r.summary?.finderQuestions;
       const fr = r.summary?.finderRisks;
       const ob = r.summary?.obligations;
@@ -967,7 +940,6 @@ async function runCase(
             obligations: { listed: ob.listed, met: ob.met, deferred: ob.deferred, covered: ob.covered, found: ob.found, open: ob.open },
           }),
           ...runFacts(d.events),
-          ...partFacts(d.events, partsOf(profile, changed).length),
           ...(rr && { resolves }),
           // A flag only: the result file keeps the run text out.
           ...(c.expectMention && { mentioned: c.expectMention.some((m) => said.some((s) => s.includes(m.toLowerCase()))) }),

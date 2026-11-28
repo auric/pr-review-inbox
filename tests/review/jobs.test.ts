@@ -14,14 +14,11 @@ import { createLive, type LiveEvent } from "../../src/server/live";
 import {
   ARCHITECTURE_LINES,
   CALLERS_LINES,
-  CLASSES_LINES,
   DEFAULT_PROFILE,
   DOC_SERVERS,
   DOCS_RULE,
   ISSUE_LINES,
   type ListTools,
-  POLISH_LINES,
-  POLISH_REVIEWER,
   PREEXISTING_LINES,
   type Profile,
   profileOf,
@@ -1711,24 +1708,24 @@ describe("language checks", () => {
     "review v3 WP-V2: the profile variants reach rl-main and rl-reviewer of review and re-review runs; only review rows record them",
     async () => {
       const h = await setup();
-      const variants: ProfileInput["variants"] = ["classes"];
+      const variants: ProfileInput["variants"] = ["architecture"];
       expect(
         (await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [{ ...general, variants }] } })).status,
       ).toBe(200);
       await h.brief(NOTE, "general");
       const review = await hungAgents(h, h.start);
-      for (const name of ["rl-main", "rl-reviewer"]) expect(review.agents[name]?.prompt).toContain(`\n${CLASSES_LINES.join("\n")}\n`);
+      for (const name of ["rl-main", "rl-reviewer"]) expect(review.agents[name]?.prompt).toContain(`\n${ARCHITECTURE_LINES.join("\n")}\n`);
 
       h.scenario({ fixture: subagentRun() });
       const base = await h.finish((await h.start()).body.id);
       h.db.query("UPDATE review_run SET source_head = $head WHERE id = $id").run({ head: h.repo.base, id: base.run.id });
       const rereview = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/rereview`, { method: "POST" }));
       expect(rereview.stdin).toContain(`An earlier run reviewed this change at ${h.repo.base}.`);
-      expect(rereview.agents["rl-main"]?.prompt).toContain(`\n${CLASSES_LINES.join("\n")}\n`);
+      expect(rereview.agents["rl-main"]?.prompt).toContain(`\n${ARCHITECTURE_LINES.join("\n")}\n`);
       const ask = await hungAgents(h, () => h.json<RunDto>(`/api/prs/${h.pr}/ask`, { body: { question: "Why?" } }));
       expect(Object.keys(ask.agents)).toEqual(["rl-main"]);
-      expect(ask.agents["rl-main"]?.prompt).not.toContain(CLASSES_LINES[0]);
-      const switched = `${REVIEW_PROMPT_VERSION}+classes`;
+      expect(ask.agents["rl-main"]?.prompt).not.toContain(ARCHITECTURE_LINES[0]);
+      const switched = `${REVIEW_PROMPT_VERSION}+architecture`;
       expect(h.db.query("SELECT kind, prompt_version FROM review_run ORDER BY id").all()).toEqual([
         ...[1, 2, 3].map(() => ({ kind: "review", prompt_version: switched })),
         { kind: "ask", prompt_version: REVIEW_PROMPT_VERSION },
@@ -1770,7 +1767,7 @@ describe("language checks", () => {
   );
 
   test(
-    "review v3 WP-V6 and the caller rule: the pre-existing mark is a default, the variants reach the finder agents; a pre-existing finding stores in its group",
+    "review v3 WP-V6 and the architecture rule: the pre-existing mark is a default, the variants reach the finder agents; a pre-existing finding stores in its group",
     async () => {
       const h = await setup();
       // README.md is the same at base and head, so a finding there is in unchanged code.
@@ -1815,21 +1812,21 @@ describe("language checks", () => {
       }
       const kept = plain.d.items.filter((i) => i.anchor?.path === "README.md");
       expect(kept.map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "preexisting"]]);
-      // architecture-bugs.md WP-AR1: the architecture lines follow the caller lines.
-      const on = await run(["callers", "architecture"]);
+      // architecture-bugs.md WP-AR1.
+      const on = await run(["architecture"]);
       expect(on.schema).toContain('"preexisting"');
       for (const name of ["rl-main", "rl-reviewer"]) {
         expect(on.agents[name]?.prompt).toContain(`\n${PREEXISTING_LINES.join("\n")}\n`);
-        expect(on.agents[name]?.prompt).toContain(`\n${[...CALLERS_LINES, ...ARCHITECTURE_LINES].join("\n")}\n`);
+        expect(on.agents[name]?.prompt).toContain(`\n${ARCHITECTURE_LINES.join("\n")}\n`);
       }
       const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
-      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+architecture+callers`);
+      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+architecture`);
     },
     SLOW,
   );
 
   test(
-    "minor-fold (AC-R60): the variant reaches the CLI schema and the finder agents; a polish point stores in the fold at balanced",
+    "minor-fold (removed 2026-11-28): the CLI schema has no polish key, and a polish mark of the model drops, so the finding shows in main",
     async () => {
       const h = await setup();
       const polish = {
@@ -1852,31 +1849,19 @@ describe("language checks", () => {
         module: "core",
         polish: true,
       };
-      const run = async (variants: ProfileInput["variants"]) => {
-        const off = { ...general, variants, verifier: { ...general.verifier, mode: "off" as const } };
-        expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [off] } })).status).toBe(200);
-        await h.brief(NOTE, "general");
-        h.scenario({ fixture: subagentRun({ ...RESULT, findings: [...RESULT.findings, polish] }) });
-        const before = h.calls().length;
-        const d = await h.finish((await h.start()).body.id);
-        expect(d.run.status).toBe("completed");
-        const find = h.calls().slice(before).find(finderCall) as Call & { agents: Agents };
-        return { d, schema: flag(find.argv, "--json-schema") ?? "", agents: find.agents };
-      };
-      const mine = (d: Awaited<ReturnType<typeof run>>["d"]) => d.items.filter((i) => (i.payload as FindingPayload).title === polish.title);
-      const plain = await run([]);
-      expect(plain.schema).not.toContain('"polish"');
-      for (const name of ["rl-main", "rl-reviewer"]) expect(plain.agents[name]?.prompt).not.toContain(POLISH_LINES[0]);
-      // Variant off: the mark drops, so the minor finding shows in main.
-      expect(mine(plain.d).map((i) => displayGroup(i.payload as FindingPayload, "balanced"))).toEqual(["main"]);
-      const on = await run(["minor-fold"]);
-      expect(on.schema).toContain('"polish"');
-      expect(on.schema).toContain('"preexisting"');
-      for (const name of ["rl-main", "rl-reviewer"]) expect(on.agents[name]?.prompt).toContain(`\n${POLISH_LINES.join("\n")}\n`);
-      expect(on.agents["rl-reviewer"]?.prompt).toContain(`\n${POLISH_REVIEWER}`);
-      expect(mine(on.d).map((i) => [i.status, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([["new", "fold"]]);
-      const row = h.db.query("SELECT prompt_version FROM review_run WHERE id = $id").get({ id: on.d.run.id }) as { prompt_version: string };
-      expect(row.prompt_version).toBe(`${REVIEW_PROMPT_VERSION}+minor-fold`);
+      const off = { ...general, verifier: { ...general.verifier, mode: "off" as const } };
+      expect((await h.json("/api/settings", { method: "PUT", body: { baseUrl: h.fake.url, profiles: [off] } })).status).toBe(200);
+      await h.brief(NOTE, "general");
+      h.scenario({ fixture: subagentRun({ ...RESULT, findings: [...RESULT.findings, polish] }) });
+      const d = await h.finish((await h.start()).body.id);
+      expect(d.run.status).toBe("completed");
+      const find = h.calls().find(finderCall) as Call & { agents: Agents };
+      expect(flag(find.argv, "--json-schema")).not.toContain('"polish"');
+      for (const name of ["rl-main", "rl-reviewer"]) expect(find.agents[name]?.prompt).not.toContain("polish point");
+      const mine = d.items.filter((i) => (i.payload as FindingPayload).title === polish.title);
+      expect(mine.map((i) => [(i.payload as FindingPayload).polish, displayGroup(i.payload as FindingPayload, "balanced")])).toEqual([
+        [undefined, "main"],
+      ]);
     },
     SLOW,
   );

@@ -40,6 +40,7 @@ import {
   setupText,
   shortHash,
   skillsText,
+  unreadText,
 } from "./model";
 import { linkish, revealList } from "./RiskEntries";
 import { sizeText } from "./tasks";
@@ -322,6 +323,7 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
   const failedCheck = review && s.kind === "done" ? checkFailedText(run.summary) : null;
   const phases = review && s.kind === "done" ? phaseParts(run.summary) : [];
   const runs = runsText(run.summary);
+  const unread = review ? unreadText(run.summary) : null;
   const at = run.finishedAt ?? run.startedAt;
   // The log footer also shows the tokens. Here they stay in the hint.
   const tokens =
@@ -652,6 +654,11 @@ function RunRow({ row, first, meta, now, cancelling, onLog, onCancel, onAnswer, 
           {runs && (
             <li data-run-twice>
               <span className="text-muted-foreground">Thorough review:</span> {runs}
+            </li>
+          )}
+          {unread && (
+            <li data-run-unread>
+              <span className="text-muted-foreground">Coverage:</span> {unread}
             </li>
           )}
           {run.consult && (
