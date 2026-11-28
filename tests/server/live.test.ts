@@ -77,14 +77,19 @@ test("a slow API request outlives the idle timeout; the live stream keeps it", a
 }, 20_000);
 
 test("a settings change that closes the database of the runs sends reset, so each tab refetches the runs and run slots", async () => {
-  const listeners: (() => void)[] = [];
-  const settings = { config: () => null, onSettingsChanged: (fn: () => void) => void listeners.push(fn) } as never;
+  const listeners: ((s: { accountChanged: boolean }) => void)[] = [];
+  const settings = {
+    config: () => null,
+    onSettingsChanged: (fn: (s: { accountChanged: boolean }) => void) => void listeners.push(fn),
+  } as never;
   const sent: LiveEvent[] = [];
   const dataDir = mkdtempSync(join(tmpdir(), "rl-live-reset-"));
   const review = createReviewJobs({ settings, dataDir, live: { ...createLive(), broadcast: (e: LiveEvent) => void sent.push(e) } });
   try {
     expect(sent).toEqual([]);
-    for (const fn of listeners) fn();
+    for (const fn of listeners) fn({ accountChanged: false });
+    expect(sent).toEqual([]);
+    for (const fn of listeners) fn({ accountChanged: true });
     expect(sent).toEqual(["reset"]);
   } finally {
     await review.stop();
